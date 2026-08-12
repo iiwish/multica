@@ -277,13 +277,6 @@
     "heatmap_quietest_weekday": "最不活跃星期几",
     "heatmap_average": "平均 {{value}}",
     "heatmap_window_total_other": "{{count}} 天总计",
-    "heatmap_weekday_mon": "周一",
-    "heatmap_weekday_tue": "周二",
-    "heatmap_weekday_wed": "周三",
-    "heatmap_weekday_thu": "周四",
-    "heatmap_weekday_fri": "周五",
-    "heatmap_weekday_sat": "周六",
-    "heatmap_weekday_sun": "周日",
     "tooltip_total": "总计"
   },
   "list": {

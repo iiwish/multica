@@ -15,6 +15,9 @@ const CELL_GAP = 3;
 // aggregation (see #MUL-2382). Labelling alternating rows keeps the density
 // readable without tying the chart structure to one language.
 const LABELED_WEEKDAY_INDICES = new Set([0, 2, 4]);
+// 2026-01-05 is a Monday, so walking 7 days from here lines the formatted
+// names up with the Monday-first `dayOfWeek` index.
+const WEEKDAY_ANCHOR = Date.UTC(2026, 0, 5);
 
 // Cells use the brand-derived chart-1 hue with descending opacity instead
 // of a neutral foreground fade, so the heatmap reads as part of the same
@@ -32,6 +35,20 @@ function fmtDate(iso: string, locale: string): string {
     month: "short",
     day: "numeric",
   });
+}
+
+// Row labels come from Intl rather than the locale bundle: for every locale
+// we ship, its short weekday names are exactly the strings we would hand-
+// translate, and the month labels below already resolve the same way. One
+// less set of strings to keep in sync when a locale is added.
+function fmtWeekdays(locale: string): string[] {
+  const fmt = new Intl.DateTimeFormat(locale, {
+    weekday: "short",
+    timeZone: "UTC",
+  });
+  return Array.from({ length: 7 }, (_, i) =>
+    fmt.format(new Date(WEEKDAY_ANCHOR + i * 86_400_000)),
+  );
 }
 
 interface Insights {
@@ -53,15 +70,7 @@ export function ActivityHeatmap({
 }) {
   const { t, i18n } = useT("runtimes");
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const weekdayLabels = [
-    t(($) => $.charts.heatmap_weekday_mon),
-    t(($) => $.charts.heatmap_weekday_tue),
-    t(($) => $.charts.heatmap_weekday_wed),
-    t(($) => $.charts.heatmap_weekday_thu),
-    t(($) => $.charts.heatmap_weekday_fri),
-    t(($) => $.charts.heatmap_weekday_sat),
-    t(($) => $.charts.heatmap_weekday_sun),
-  ];
+  const weekdayLabels = useMemo(() => fmtWeekdays(locale), [locale]);
   // Memo dep — estimateCost (called inside the body below) consults the
   // user-override store, so saving a custom rate must invalidate the cells.
   const pricings = useCustomPricingStore((s) => s.pricings);
@@ -243,6 +252,10 @@ export function ActivityHeatmap({
                 fill={getHeatmapColor(c.level)}
                 className="transition-colors"
               >
+                {/* The tooltip date stays ISO on purpose: it is the exact
+                    day key behind the cell, and readers compare it against
+                    the API / CLI usage rows, which are ISO too. Only the
+                    prose around it is translated. */}
                 <title>
                   {c.date}:{" "}
                   {c.cost > 0

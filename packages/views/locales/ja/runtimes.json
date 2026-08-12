@@ -277,13 +277,6 @@
     "heatmap_quietest_weekday": "最も静かな曜日",
     "heatmap_average": "平均 {{value}}",
     "heatmap_window_total_other": "{{count}}日間の合計",
-    "heatmap_weekday_mon": "月",
-    "heatmap_weekday_tue": "火",
-    "heatmap_weekday_wed": "水",
-    "heatmap_weekday_thu": "木",
-    "heatmap_weekday_fri": "金",
-    "heatmap_weekday_sat": "土",
-    "heatmap_weekday_sun": "日",
     "tooltip_total": "合計"
   },
   "list": {

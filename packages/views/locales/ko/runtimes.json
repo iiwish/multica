@@ -277,13 +277,6 @@
     "heatmap_quietest_weekday": "가장 한산한 요일",
     "heatmap_average": "평균 {{value}}",
     "heatmap_window_total_other": "{{count}}일 합계",
-    "heatmap_weekday_mon": "월",
-    "heatmap_weekday_tue": "화",
-    "heatmap_weekday_wed": "수",
-    "heatmap_weekday_thu": "목",
-    "heatmap_weekday_fri": "금",
-    "heatmap_weekday_sat": "토",
-    "heatmap_weekday_sun": "일",
     "tooltip_total": "합계"
   },
   "list": {
