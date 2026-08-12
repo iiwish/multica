@@ -283,6 +283,20 @@
   "charts": {
     "heatmap_less": "Less",
     "heatmap_more": "More",
+    "heatmap_no_activity": "No activity",
+    "heatmap_busiest_day": "Busiest day",
+    "heatmap_most_active_weekday": "Most active weekday",
+    "heatmap_quietest_weekday": "Quietest weekday",
+    "heatmap_average": "avg {{value}}",
+    "heatmap_window_total_one": "{{count}}-day total",
+    "heatmap_window_total_other": "{{count}}-day total",
+    "heatmap_weekday_mon": "Mon",
+    "heatmap_weekday_tue": "Tue",
+    "heatmap_weekday_wed": "Wed",
+    "heatmap_weekday_thu": "Thu",
+    "heatmap_weekday_fri": "Fri",
+    "heatmap_weekday_sat": "Sat",
+    "heatmap_weekday_sun": "Sun",
     "tooltip_total": "Total"
   },
   "list": {

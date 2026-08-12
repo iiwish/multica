@@ -12,10 +12,9 @@ const HEATMAP_WEEKS = 26;
 const CELL_SIZE = 16;
 const CELL_GAP = 3;
 // Monday-first row order, matching ISO 8601 and the rest of the Weekly
-// aggregation (see #MUL-2382). Rows labelled Mon / Wed / Fri keep the
-// density readable.
-const DAY_LABELS = ["Mon", "", "Wed", "", "Fri", "", ""];
-const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// aggregation (see #MUL-2382). Labelling alternating rows keeps the density
+// readable without tying the chart structure to one language.
+const LABELED_WEEKDAY_INDICES = new Set([0, 2, 4]);
 
 // Cells use the brand-derived chart-1 hue with descending opacity instead
 // of a neutral foreground fade, so the heatmap reads as part of the same
@@ -28,8 +27,8 @@ function getHeatmapColor(level: number): string {
   return `color-mix(in oklch, var(--color-chart-1) ${opacities[level - 1]}, transparent)`;
 }
 
-function fmtDate(iso: string): string {
-  return new Date(iso + "T00:00:00").toLocaleString("en", {
+function fmtDate(iso: string, locale: string): string {
+  return new Date(iso + "T00:00:00").toLocaleString(locale, {
     month: "short",
     day: "numeric",
   });
@@ -37,9 +36,9 @@ function fmtDate(iso: string): string {
 
 interface Insights {
   busiestDay: { date: string; cost: number } | null;
-  busyDayName: string | null;
+  busyDayIndex: number | null;
   busyDayAvg: number;
-  quietDayName: string | null;
+  quietDayIndex: number | null;
   quietDayAvg: number;
   totalCost: number;
   windowDays: number;
@@ -52,7 +51,17 @@ export function ActivityHeatmap({
   usage: RuntimeUsage[];
   tz: string;
 }) {
-  const { t } = useT("runtimes");
+  const { t, i18n } = useT("runtimes");
+  const locale = i18n.resolvedLanguage ?? i18n.language;
+  const weekdayLabels = [
+    t(($) => $.charts.heatmap_weekday_mon),
+    t(($) => $.charts.heatmap_weekday_tue),
+    t(($) => $.charts.heatmap_weekday_wed),
+    t(($) => $.charts.heatmap_weekday_thu),
+    t(($) => $.charts.heatmap_weekday_fri),
+    t(($) => $.charts.heatmap_weekday_sat),
+    t(($) => $.charts.heatmap_weekday_sun),
+  ];
   // Memo dep — estimateCost (called inside the body below) consults the
   // user-override store, so saving a custom rate must invalidate the cells.
   const pricings = useCustomPricingStore((s) => s.pricings);
@@ -123,7 +132,7 @@ export function ActivityHeatmap({
       const month = new Date(c.date + "T00:00:00").getMonth();
       if (month !== lastMonth && c.dayOfWeek === 0) {
         months.push({
-          label: new Date(c.date + "T00:00:00").toLocaleString("en", {
+          label: new Date(c.date + "T00:00:00").toLocaleString(locale, {
             month: "short",
           }),
           week: c.week,
@@ -150,41 +159,40 @@ export function ActivityHeatmap({
       const count = weekdayCount[i] ?? 0;
       return count > 0 ? s / count : 0;
     });
-    let busyDayName: string | null = null;
+    let busyDayIndex: number | null = null;
     let busyDayAvg = 0;
-    let quietDayName: string | null = null;
+    let quietDayIndex: number | null = null;
     let quietDayAvg = Number.POSITIVE_INFINITY;
     weekdayAvg.forEach((avg, i) => {
-      const name = WEEKDAY_NAMES[i] ?? "";
       if (avg > busyDayAvg) {
         busyDayAvg = avg;
-        busyDayName = name;
+        busyDayIndex = i;
       }
       if (avg < quietDayAvg) {
         quietDayAvg = avg;
-        quietDayName = name;
+        quietDayIndex = i;
       }
     });
     if (quietDayAvg === Number.POSITIVE_INFINITY) quietDayAvg = 0;
     // When the window has no spend at all, the busy / quiet weekday picks
     // are noise (every weekday averaged to 0). Suppress them.
     if (totalCost === 0) {
-      busyDayName = null;
-      quietDayName = null;
+      busyDayIndex = null;
+      quietDayIndex = null;
     }
 
     const insights: Insights = {
       busiestDay,
-      busyDayName,
+      busyDayIndex,
       busyDayAvg,
-      quietDayName,
+      quietDayIndex,
       quietDayAvg,
       totalCost,
       windowDays: allCells.length,
     };
 
     return { cells: cellsWithLevel, monthLabels: months, insights };
-  }, [usage, pricings, tz]);
+  }, [usage, pricings, tz, locale]);
 
   const labelWidth = 28;
   const svgWidth = labelWidth + HEATMAP_WEEKS * (CELL_SIZE + CELL_GAP);
@@ -211,8 +219,8 @@ export function ActivityHeatmap({
                 {m.label}
               </text>
             ))}
-            {DAY_LABELS.map((label, i) =>
-              label ? (
+            {weekdayLabels.map((label, i) =>
+              LABELED_WEEKDAY_INDICES.has(i) ? (
                 <text
                   key={i}
                   x={0}
@@ -237,7 +245,9 @@ export function ActivityHeatmap({
               >
                 <title>
                   {c.date}:{" "}
-                  {c.cost > 0 ? `$${c.cost.toFixed(2)}` : "No activity"}
+                  {c.cost > 0
+                    ? `$${c.cost.toFixed(2)}`
+                    : t(($) => $.charts.heatmap_no_activity)}
                 </title>
               </rect>
             ))}
@@ -256,7 +266,11 @@ export function ActivityHeatmap({
         </div>
       </div>
 
-      <InsightsRow insights={insights} />
+      <InsightsRow
+        insights={insights}
+        locale={locale}
+        weekdayLabels={weekdayLabels}
+      />
     </div>
   );
 }
@@ -264,12 +278,21 @@ export function ActivityHeatmap({
 // Horizontal stat strip beneath the heatmap. Mirrors the page-top KPI
 // hero pattern (label → big value → sub) but at smaller scale to stay
 // secondary. 4 columns on desktop, 2 on narrow screens.
-function InsightsRow({ insights }: { insights: Insights }) {
+function InsightsRow({
+  insights,
+  locale,
+  weekdayLabels,
+}: {
+  insights: Insights;
+  locale: string;
+  weekdayLabels: string[];
+}) {
+  const { t } = useT("runtimes");
   const {
     busiestDay,
-    busyDayName,
+    busyDayIndex,
     busyDayAvg,
-    quietDayName,
+    quietDayIndex,
     quietDayAvg,
     totalCost,
     windowDays,
@@ -277,21 +300,32 @@ function InsightsRow({ insights }: { insights: Insights }) {
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t pt-3 sm:grid-cols-4">
       <Insight
-        label="Busiest day"
-        value={busiestDay ? fmtDate(busiestDay.date) : "—"}
+        label={t(($) => $.charts.heatmap_busiest_day)}
+        value={busiestDay ? fmtDate(busiestDay.date, locale) : "—"}
         sub={busiestDay ? formatUsd(busiestDay.cost) : null}
       />
       <Insight
-        label="Most active weekday"
-        value={busyDayName ?? "—"}
-        sub={busyDayName ? `avg ${formatUsd(busyDayAvg)}` : null}
+        label={t(($) => $.charts.heatmap_most_active_weekday)}
+        value={
+          busyDayIndex === null ? "—" : (weekdayLabels[busyDayIndex] ?? "—")
+        }
+        sub={busyDayIndex !== null
+          ? t(($) => $.charts.heatmap_average, { value: formatUsd(busyDayAvg) })
+          : null}
       />
       <Insight
-        label="Quietest weekday"
-        value={quietDayName ?? "—"}
-        sub={quietDayName ? `avg ${formatUsd(quietDayAvg)}` : null}
+        label={t(($) => $.charts.heatmap_quietest_weekday)}
+        value={
+          quietDayIndex === null ? "—" : (weekdayLabels[quietDayIndex] ?? "—")
+        }
+        sub={quietDayIndex !== null
+          ? t(($) => $.charts.heatmap_average, { value: formatUsd(quietDayAvg) })
+          : null}
       />
-      <Insight label={`${windowDays}-day total`} value={formatUsd(totalCost)} />
+      <Insight
+        label={t(($) => $.charts.heatmap_window_total, { count: windowDays })}
+        value={formatUsd(totalCost)}
+      />
     </dl>
   );
 }
