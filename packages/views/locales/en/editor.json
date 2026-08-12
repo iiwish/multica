@@ -52,6 +52,7 @@
     "preview": "Preview",
     "preview_loading": "Loading preview…",
     "preview_failed": "Couldn't load preview",
+    "preview_timeout": "Preview took too long. Download the file instead.",
     "preview_too_large": "File is too large to preview. Please download.",
     "preview_unsupported": "This file type can't be previewed.",
     "close": "Close",

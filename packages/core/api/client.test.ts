@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient, ApiError, CHAT_DRAFT_RESTORE_CAPABILITY } from "./client";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -1269,6 +1270,28 @@ describe("ApiClient", () => {
       await expect(client.getAttachmentTextContent("att-1")).rejects.toBeInstanceOf(
         PreviewUnsupportedError,
       );
+    });
+
+    it("aborts a stalled preview and throws PreviewTimeoutError", async () => {
+      const { PreviewTimeoutError } = await import("./client");
+      vi.useFakeTimers();
+      const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "AbortError"));
+          });
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const client = new ApiClient("https://api.example.test");
+      const assertion = expect(
+        client.getAttachmentTextContent("att-stalled"),
+      ).rejects.toBeInstanceOf(PreviewTimeoutError);
+
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
     });
   });
 

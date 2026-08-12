@@ -461,6 +461,18 @@ export class PreviewUnsupportedError extends Error {
   }
 }
 
+// Thrown when the content proxy does not return the complete preview body in
+// a bounded amount of time. Downloads use a separate path and remain
+// available as the recovery action.
+export class PreviewTimeoutError extends Error {
+  constructor() {
+    super("attachment inline preview timed out");
+    this.name = "PreviewTimeoutError";
+  }
+}
+
+const ATTACHMENT_PREVIEW_TIMEOUT_MS = 15_000;
+
 /**
  * Advertised in X-Client-Capabilities so the server knows this client can
  * recover a cancelled prompt from the durable draft-restore row (#5219).
@@ -2692,24 +2704,37 @@ export class ApiClient {
   // Routes through `fetchRaw` so it inherits the standard auth headers,
   // 401 → handleUnauthorized recovery, request-id logging, and ApiError
   // shape. 413 / 415 are translated to typed `Preview*Error` instances so
-  // the modal can render specific fallbacks instead of generic failure.
+  // the modal can render specific fallbacks instead of generic failure. A
+  // bounded request budget also keeps a stalled proxy read from pinning the
+  // preview in its loading state indefinitely.
   async getAttachmentTextContent(
     id: string,
   ): Promise<{ text: string; originalContentType: string }> {
-    let res: Response;
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, ATTACHMENT_PREVIEW_TIMEOUT_MS);
+
     try {
-      res = await this.fetchRaw(`/api/attachments/${id}/content`);
+      const res = await this.fetchRaw(`/api/attachments/${id}/content`, {
+        signal: controller.signal,
+      });
+      return {
+        text: await res.text(),
+        originalContentType: res.headers.get("X-Original-Content-Type") ?? "",
+      };
     } catch (err) {
+      if (timedOut) throw new PreviewTimeoutError();
       if (err instanceof ApiError) {
         if (err.status === 413) throw new PreviewTooLargeError();
         if (err.status === 415) throw new PreviewUnsupportedError();
       }
       throw err;
+    } finally {
+      clearTimeout(timeout);
     }
-    return {
-      text: await res.text(),
-      originalContentType: res.headers.get("X-Original-Content-Type") ?? "",
-    };
   }
 
   // Fetches the raw bytes of an attachment through the unified download

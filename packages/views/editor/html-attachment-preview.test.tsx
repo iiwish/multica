@@ -3,13 +3,25 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-const { getAttachmentTextContentMock } = vi.hoisted(() => ({
-  getAttachmentTextContentMock: vi.fn(),
-}));
+const { getAttachmentTextContentMock, FakePreviewTimeoutError } = vi.hoisted(
+  () => {
+    class FakePreviewTimeoutError extends Error {
+      constructor() {
+        super("timeout");
+        this.name = "PreviewTimeoutError";
+      }
+    }
+    return {
+      getAttachmentTextContentMock: vi.fn(),
+      FakePreviewTimeoutError,
+    };
+  },
+);
 
 vi.mock("@multica/core/api", () => ({
   api: { getAttachmentTextContent: getAttachmentTextContentMock },
   PreviewTooLargeError: class extends Error {},
+  PreviewTimeoutError: FakePreviewTimeoutError,
   PreviewUnsupportedError: class extends Error {},
 }));
 
@@ -22,6 +34,7 @@ vi.mock("../i18n", () => ({
           preview: "Preview",
           preview_loading: "Loading preview…",
           preview_failed: "Couldn't load preview",
+          preview_timeout: "Preview took too long. Download the file instead.",
           open_in_new_tab: "Open in new tab",
         },
       }),
@@ -237,6 +250,27 @@ describe("HtmlAttachmentPreview — toolbar actions", () => {
 });
 
 describe("HtmlAttachmentPreview — failure mode does not unmount the toolbar", () => {
+  it("shows an actionable error when the content request times out", async () => {
+    getAttachmentTextContentMock.mockRejectedValueOnce(
+      new FakePreviewTimeoutError(),
+    );
+    renderWithQuery(
+      <HtmlAttachmentPreview
+        attachmentId="att-1"
+        filename="report.html"
+        onPreview={() => {}}
+        onDownload={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Preview took too long. Download the file instead."),
+      ).toBeTruthy();
+    });
+    expect(screen.getByTitle("Download")).toBeTruthy();
+  });
+
   it("keeps Preview and Download enabled when fetch errors", async () => {
     getAttachmentTextContentMock.mockRejectedValueOnce(new Error("nope"));
     const onPreview = vi.fn();

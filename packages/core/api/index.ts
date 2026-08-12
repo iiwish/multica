@@ -4,6 +4,7 @@ export {
   dispatchReasonCode,
   errorCode,
   PreviewTooLargeError,
+  PreviewTimeoutError,
   PreviewUnsupportedError,
 } from "./client";
 export type {

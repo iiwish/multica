@@ -73,7 +73,10 @@ import {
   type PreviewKind,
 } from "./utils/preview";
 import { useDownloadAttachment } from "./use-download-attachment";
-import { useAttachmentHtmlText } from "./hooks/use-attachment-html-text";
+import {
+  isAttachmentPreviewTimeout,
+  useAttachmentHtmlText,
+} from "./hooks/use-attachment-html-text";
 import { useResignedInlineMediaURL } from "./hooks/use-inline-media-url";
 import { useZoomCanvas, type ZoomCanvasApi } from "./hooks/use-zoom-canvas";
 import { ZoomCanvas, ZoomControls } from "./zoom-canvas";
@@ -926,6 +929,14 @@ function TextBackedPreview({
       return (
         <UnsupportedFallback
           message={t(($) => $.attachment.preview_unsupported)}
+          onDownload={onDownload}
+        />
+      );
+    }
+    if (isAttachmentPreviewTimeout(query.error)) {
+      return (
+        <UnsupportedFallback
+          message={t(($) => $.attachment.preview_timeout)}
           onDownload={onDownload}
         />
       );

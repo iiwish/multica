@@ -19,6 +19,7 @@ const {
   downloadMock,
   getBaseUrlMock,
   FakePreviewTooLargeError,
+  FakePreviewTimeoutError,
   FakePreviewUnsupportedError,
 } = vi.hoisted(() => {
   class FakePreviewTooLargeError extends Error {
@@ -33,6 +34,12 @@ const {
       this.name = "PreviewUnsupportedError";
     }
   }
+  class FakePreviewTimeoutError extends Error {
+    constructor() {
+      super("timeout");
+      this.name = "PreviewTimeoutError";
+    }
+  }
   return {
     getAttachmentTextContentMock: vi.fn(),
     downloadMock: vi.fn(),
@@ -40,6 +47,7 @@ const {
     // the desktop-renderer / standalone-shell case override per-test.
     getBaseUrlMock: vi.fn(() => ""),
     FakePreviewTooLargeError,
+    FakePreviewTimeoutError,
     FakePreviewUnsupportedError,
   };
 });
@@ -50,6 +58,7 @@ vi.mock("@multica/core/api", () => ({
     getBaseUrl: getBaseUrlMock,
   },
   PreviewTooLargeError: FakePreviewTooLargeError,
+  PreviewTimeoutError: FakePreviewTimeoutError,
   PreviewUnsupportedError: FakePreviewUnsupportedError,
 }));
 
@@ -114,6 +123,7 @@ vi.mock("../i18n", () => ({
           preview: "Preview",
           preview_loading: "Loading preview…",
           preview_failed: "Couldn't load preview",
+          preview_timeout: "Preview took too long. Download the file instead.",
           preview_too_large: "File is too large to preview. Please download.",
           preview_unsupported: "This file type can't be previewed.",
           close: "Close",
@@ -435,6 +445,34 @@ describe("AttachmentPreviewModal — error states", () => {
     await waitFor(() => {
       expect(screen.getByText("This file type can't be previewed.")).toBeTruthy();
     });
+  });
+
+  it("shows a download fallback when the content request times out", async () => {
+    getAttachmentTextContentMock.mockRejectedValueOnce(
+      new FakePreviewTimeoutError(),
+    );
+    const att = makeAttachment({
+      filename: "slow.md",
+      content_type: "text/markdown",
+    });
+    render(
+      <AttachmentPreviewModal
+        source={{ kind: "full", attachment: att }}
+        open
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Preview took too long. Download the file instead."),
+      ).toBeTruthy();
+    });
+    expect(
+      screen
+        .getAllByRole("button", { name: "Download" })
+        .some((button) => button.textContent === "Download"),
+    ).toBe(true);
   });
 
   it("shows the generic failed fallback on a transport error", async () => {

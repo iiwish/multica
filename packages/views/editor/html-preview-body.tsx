@@ -27,7 +27,10 @@ import {
 import { useT } from "../i18n";
 import { CodeBlockIframe } from "./code-block-iframe";
 import { withFragmentNavShim } from "./utils/iframe-fragment-nav";
-import { useAttachmentHtmlText } from "./hooks/use-attachment-html-text";
+import {
+  isAttachmentPreviewTimeout,
+  useAttachmentHtmlText,
+} from "./hooks/use-attachment-html-text";
 
 export type HtmlSource =
   | { kind: "inline"; html: string }
@@ -114,6 +117,8 @@ function AttachmentBody({
     const message =
       query.error instanceof PreviewTooLargeError
         ? t(($) => $.attachment.preview_too_large)
+        : isAttachmentPreviewTimeout(query.error)
+        ? t(($) => $.attachment.preview_timeout)
         : query.error instanceof PreviewUnsupportedError
         ? t(($) => $.attachment.preview_unsupported)
         : t(($) => $.attachment.preview_failed);

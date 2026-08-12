@@ -52,6 +52,7 @@
     "preview": "预览",
     "preview_loading": "加载预览中…",
     "preview_failed": "预览加载失败",
+    "preview_timeout": "预览加载超时，请下载文件查看。",
     "preview_too_large": "文件太大，无法在线预览，请下载查看。",
     "preview_unsupported": "该文件类型暂不支持预览。",
     "close": "关闭",

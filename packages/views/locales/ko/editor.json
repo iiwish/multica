@@ -52,6 +52,7 @@
     "preview": "미리보기",
     "preview_loading": "미리보기 불러오는 중...",
     "preview_failed": "미리보기를 불러오지 못했습니다",
+    "preview_timeout": "미리보기 시간이 초과되었습니다. 파일을 다운로드하세요.",
     "preview_too_large": "파일이 너무 커서 미리볼 수 없습니다. 다운로드하세요.",
     "preview_unsupported": "이 파일 형식은 미리보기를 지원하지 않습니다.",
     "close": "닫기",

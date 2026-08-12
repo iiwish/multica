@@ -14,6 +14,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@multica/core/api";
 
+export function isAttachmentPreviewTimeout(error: unknown): boolean {
+  return error instanceof Error && error.name === "PreviewTimeoutError";
+}
+
 export function useAttachmentHtmlText(attachmentId: string | null | undefined) {
   return useQuery({
     queryKey: ["attachment-content", attachmentId ?? ""] as const,
