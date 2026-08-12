@@ -275,7 +275,7 @@ CLI の設定ファイルには、あなたとして Multica にアクセスで�
 
 | コマンド | サブコマンド | 用途 | 主なフラグ |
 | --- | --- | --- | --- |
-| `daemon` | `start` | ローカルデーモンを起動 | `--foreground`、`--device-name`、`--runtime-name`、`--poll-interval`、`--heartbeat-interval`、`--agent-timeout`（`0` は上限なし）、`--max-concurrent-tasks`、`--no-auto-update`；それぞれに対応する `MULTICA_*` 環境変数があります |
+| `daemon` | `start` | ローカルデーモンを起動 | `--foreground`、`--device-name`、`--runtime-name`、`--workspaces-root`、`--poll-interval`、`--heartbeat-interval`、`--agent-timeout`（`0` は上限なし）、`--max-concurrent-tasks`、`--no-auto-update`；それぞれに対応する `MULTICA_*` 環境変数があります |
 | | `stop` / `status` / `restart` | 停止、状態の確認、再起動（`restart` は `start` と同じフラグ） | |
 | | `logs` | デーモンのログを表示 | `--follow`、`--lines` |
 | | `disk-usage` | ローカルのディスク使用量を表示 | `--by-workspace`、`--by-task`、`--top` |

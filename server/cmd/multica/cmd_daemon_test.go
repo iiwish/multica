@@ -105,6 +105,20 @@ func TestBuildDaemonStartArgsForwardsCodexHandshakeTimeout(t *testing.T) {
 	}
 }
 
+func TestBuildDaemonStartArgsForwardsWorkspacesRoot(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("workspaces-root", "", "")
+	if err := cmd.Flags().Set("workspaces-root", "/Volumes/Agent Workspaces"); err != nil {
+		t.Fatalf("set flag: %v", err)
+	}
+
+	args := buildDaemonStartArgs(cmd)
+	want := []string{"daemon", "start", "--foreground", "--workspaces-root", "/Volumes/Agent Workspaces"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("buildDaemonStartArgs() = %q, want %q", args, want)
+	}
+}
+
 // TestBuildDaemonStartArgsForwardsNoAutoReload matters because `daemon start`
 // re-execs itself as a foreground child: a flag the parent parsed but doesn't
 // forward is silently dropped, so the opt-out would appear to work and not.
@@ -131,6 +145,16 @@ func TestNoAutoReloadFlagRegisteredOnBothDaemonCommands(t *testing.T) {
 	for _, cmd := range []*cobra.Command{daemonStartCmd, daemonRestartCmd} {
 		if cmd.Flags().Lookup("no-auto-reload") == nil {
 			t.Errorf("daemon %s is missing --no-auto-reload", cmd.Name())
+		}
+	}
+}
+
+func TestWorkspacesRootFlagRegisteredOnBothDaemonCommands(t *testing.T) {
+	t.Parallel()
+
+	for _, cmd := range []*cobra.Command{daemonStartCmd, daemonRestartCmd} {
+		if cmd.Flags().Lookup("workspaces-root") == nil {
+			t.Errorf("daemon %s is missing --workspaces-root", cmd.Name())
 		}
 	}
 }

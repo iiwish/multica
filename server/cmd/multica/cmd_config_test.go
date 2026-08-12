@@ -35,13 +35,16 @@ func TestRunConfigSetPersistsSupportedKeysInProfile(t *testing.T) {
 	if err := runConfigSet(cmd, []string{"workspace_id", "ws-123"}); err != nil {
 		t.Fatalf("runConfigSet workspace_id: %v", err)
 	}
+	if err := runConfigSet(cmd, []string{"workspaces_root", "/data/multica-dev"}); err != nil {
+		t.Fatalf("runConfigSet workspaces_root: %v", err)
+	}
 	_ = stderr.read()
 
 	cfg, err := cli.LoadCLIConfigForProfile("dev")
 	if err != nil {
 		t.Fatalf("LoadCLIConfigForProfile: %v", err)
 	}
-	if cfg.ServerURL != "http://127.0.0.1:8080" || cfg.AppURL != "http://127.0.0.1:3000" || cfg.WorkspaceID != "ws-123" {
+	if cfg.ServerURL != "http://127.0.0.1:8080" || cfg.AppURL != "http://127.0.0.1:3000" || cfg.WorkspaceID != "ws-123" || cfg.WorkspacesRoot != "/data/multica-dev" {
 		t.Fatalf("config = %#v, want persisted supported keys", cfg)
 	}
 }
@@ -64,6 +67,7 @@ func TestRunConfigShowIncludesProfileAndDefaults(t *testing.T) {
 		"workspace_id:",
 		"device_name:",
 		"runtime_name:",
+		"workspaces_root:",
 		"max_concurrent_tasks:",
 		"poll_interval:",
 		"heartbeat_interval:",
@@ -198,6 +202,7 @@ func TestApplyConfigSetSupportsDaemonKeys(t *testing.T) {
 	pairs := []struct{ key, val string }{
 		{"device_name", "vm-1-custom-name"},
 		{"runtime_name", "worker-a"},
+		{"workspaces_root", "/mnt/multica"},
 		{"max_concurrent_tasks", "4"},
 		{"poll_interval", "10s"},
 		{"heartbeat_interval", "5s"},
@@ -214,6 +219,7 @@ func TestApplyConfigSetSupportsDaemonKeys(t *testing.T) {
 	}
 	if cfg.DeviceName != "vm-1-custom-name" ||
 		cfg.RuntimeName != "worker-a" ||
+		cfg.WorkspacesRoot != "/mnt/multica" ||
 		cfg.MaxConcurrentTasks != 4 ||
 		cfg.PollInterval != "10s" ||
 		cfg.HeartbeatInterval != "5s" ||

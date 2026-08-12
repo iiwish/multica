@@ -275,7 +275,7 @@ CLI 설정 파일에는 사용자를 대신해 Multica에 접근할 수 있는 t
 
 | 명령 | 하위 명령 | 용도 | 주요 flag |
 | --- | --- | --- | --- |
-| `daemon` | `start` | 로컬 데몬 시작 | `--foreground`, `--device-name`, `--runtime-name`, `--poll-interval`, `--heartbeat-interval`, `--agent-timeout`(`0`은 상한 없음), `--max-concurrent-tasks`, `--no-auto-update`. 모두 대응하는 `MULTICA_*` 환경 변수가 있음 |
+| `daemon` | `start` | 로컬 데몬 시작 | `--foreground`, `--device-name`, `--runtime-name`, `--workspaces-root`, `--poll-interval`, `--heartbeat-interval`, `--agent-timeout`(`0`은 상한 없음), `--max-concurrent-tasks`, `--no-auto-update`. 모두 대응하는 `MULTICA_*` 환경 변수가 있음 |
 | | `stop` / `status` / `restart` | 중지, 상태 확인, 다시 시작(`restart`와 `start`의 flag가 같음) | |
 | | `logs` | 데몬 로그 확인 | `--follow`, `--lines` |
 | | `disk-usage` | 로컬 디스크 사용량 확인 | `--by-workspace`, `--by-task`, `--top` |
