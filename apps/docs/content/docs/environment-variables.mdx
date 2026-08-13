@@ -253,6 +253,7 @@ A few value rules:
 - Duration keys accept positive Go durations (such as `10s`, `2h`); `0s` and negative values are rejected. The one exception is `agent_timeout`: `0s` is valid and explicitly disables the run time limit.
 - Passing an empty string clears a persisted value and falls back to the env var or built-in default, for example `multica config set poll_interval ""`.
 - `max_concurrent_tasks` requires a non-negative integer.
+- Relative `workspaces_root` values are converted to absolute paths when saved.
 
 ## Observability and analytics
 

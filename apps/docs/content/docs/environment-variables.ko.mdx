@@ -253,6 +253,7 @@ multica config show
 - duration key는 양의 Go duration(예: `10s`, `2h`)을 허용하며 `0s`와 음수는 거부합니다. 유일한 예외는 `agent_timeout`입니다. `0s`가 유효하며 실행 시간 제한을 명시적으로 끕니다.
 - 빈 문자열을 전달하면 저장된 값을 지우고 환경 변수 또는 내장 기본값으로 돌아갑니다. 예: `multica config set poll_interval ""`
 - `max_concurrent_tasks`는 0 이상의 정수여야 합니다.
+- 상대 `workspaces_root` 값은 저장할 때 절대 경로로 변환됩니다.
 
 ## 관측과 통계
 

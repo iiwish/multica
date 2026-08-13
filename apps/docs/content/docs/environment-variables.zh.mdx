@@ -253,6 +253,7 @@ multica config show
 - duration 类键接受正的 Go duration（如 `10s`、`2h`），`0s` 和负值会被拒绝。唯一例外是 `agent_timeout`：`0s` 合法，表示明确关闭执行时限。
 - 传空字符串清除已持久化的值，回到环境变量或内置默认，例如 `multica config set poll_interval ""`。
 - `max_concurrent_tasks` 要求非负整数。
+- 相对的 `workspaces_root` 值在保存时会转换为绝对路径。
 
 ## 观测与统计
 

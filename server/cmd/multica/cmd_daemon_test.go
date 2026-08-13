@@ -717,6 +717,30 @@ func TestPrintDiskUsageOtherRootsHintSuggestsDefaultFromNamedProfile(t *testing.
 	}
 }
 
+func TestPrintDiskUsageOtherRootsHintUsesProfileConfig(t *testing.T) {
+	home := t.TempDir()
+	customRoot := filepath.Join(t.TempDir(), "custom-profile-root")
+	t.Setenv("HOME", home)
+	t.Setenv("MULTICA_WORKSPACES_ROOT", "")
+	if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{WorkspacesRoot: customRoot}, "custom"); err != nil {
+		t.Fatalf("SaveCLIConfigForProfile: %v", err)
+	}
+	writeDiskUsageFile(t, filepath.Join(customRoot, "ws1", "task1", "workdir", "main.go"))
+
+	var out bytes.Buffer
+	printDiskUsageOtherRootsHint(&out, daemon.DiskUsageReport{
+		WorkspacesRoot: filepath.Join(home, "multica_workspaces"),
+	}, "", "", false)
+
+	got := out.String()
+	if !strings.Contains(got, customRoot) {
+		t.Fatalf("hint output = %q, want configured root %q", got, customRoot)
+	}
+	if strings.Contains(got, filepath.Join(home, "multica_workspaces_custom")) {
+		t.Fatalf("hint output = %q, must not suggest the profile's old default root", got)
+	}
+}
+
 func TestPrintDiskUsageOtherRootsHintSkipsExplicitRootOverride(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

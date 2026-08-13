@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -131,7 +132,11 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "Set %s = %s\n", key, value)
+	storedValue := value
+	if key == "workspaces_root" {
+		storedValue = cfg.WorkspacesRoot
+	}
+	fmt.Fprintf(os.Stderr, "Set %s = %s\n", key, storedValue)
 	return nil
 }
 
@@ -158,7 +163,16 @@ func applyConfigSet(cfg *cli.CLIConfig, key, value string) error {
 	case "runtime_name":
 		cfg.RuntimeName = value
 	case "workspaces_root":
-		cfg.WorkspacesRoot = value
+		value = strings.TrimSpace(value)
+		if value == "" {
+			cfg.WorkspacesRoot = ""
+			return nil
+		}
+		root, err := filepath.Abs(value)
+		if err != nil {
+			return fmt.Errorf("resolve workspaces_root: %w", err)
+		}
+		cfg.WorkspacesRoot = root
 	case "max_concurrent_tasks":
 		if value == "" {
 			cfg.MaxConcurrentTasks = 0
