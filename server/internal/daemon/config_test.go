@@ -111,6 +111,39 @@ func TestDefaultGCIntervalIsTwoHours(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_CompletedTaskTTLDefaultsDisabledAndReadsEnv(t *testing.T) {
+	stageFakeAgent(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "missing-shell"))
+	t.Setenv("MULTICA_GC_COMPLETED_TASK_TTL", "")
+
+	overrides := Overrides{
+		ServerURL:      "http://localhost:0",
+		WorkspacesRoot: t.TempDir(),
+	}
+	cfg, err := LoadConfig(overrides)
+	if err != nil {
+		t.Fatalf("LoadConfig with default completed-task TTL: %v", err)
+	}
+	if cfg.GCCompletedTaskTTL != 0 {
+		t.Fatalf("GCCompletedTaskTTL = %s, want disabled", cfg.GCCompletedTaskTTL)
+	}
+
+	t.Setenv("MULTICA_GC_COMPLETED_TASK_TTL", "36h")
+	cfg, err = LoadConfig(overrides)
+	if err != nil {
+		t.Fatalf("LoadConfig with completed-task TTL: %v", err)
+	}
+	if cfg.GCCompletedTaskTTL != 36*time.Hour {
+		t.Fatalf("GCCompletedTaskTTL = %s, want 36h", cfg.GCCompletedTaskTTL)
+	}
+
+	t.Setenv("MULTICA_GC_COMPLETED_TASK_TTL", "not-a-duration")
+	if _, err := LoadConfig(overrides); err == nil || !strings.Contains(err.Error(), "MULTICA_GC_COMPLETED_TASK_TTL") {
+		t.Fatalf("LoadConfig invalid completed-task TTL error = %v, want named validation error", err)
+	}
+}
+
 func TestRepoMaintenanceKillSwitchDefaultsOnAndCanDisable(t *testing.T) {
 	t.Setenv("MULTICA_GC_REPO_MAINTENANCE_ENABLED", "")
 	if !boolFromEnv("MULTICA_GC_REPO_MAINTENANCE_ENABLED", true) {
