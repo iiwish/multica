@@ -443,9 +443,9 @@ type AgentTaskResponse struct {
 	Attribution *TaskAttribution `json:"attribution,omitempty"`
 	// Usage is this run's own token consumption, one entry per (provider, model)
 	// it used — the same grain `task_usage` stores and the same grain the client
-	// prices at. Hydrated only on the issue-facing execution-log endpoint
-	// (ListTasksByIssue); the daemon claim path leaves it nil so the claim
-	// payload does not carry accounting the agent has no use for.
+	// prices at. Hydrated on user-facing task-history endpoints; the daemon claim
+	// path leaves it nil so the claim payload does not carry accounting the agent
+	// has no use for.
 	//
 	// nil and [] are both "no usage recorded" and the UI renders an em dash for
 	// them — a run that predates usage reporting, or one that died before any
@@ -2315,6 +2315,7 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 		resp[i] = taskToResponse(t, workspaceID)
 	}
 	h.hydrateTaskAttributions(r.Context(), attributionsOf(resp))
+	h.hydrateAgentTaskUsage(r.Context(), agent.ID, resp)
 
 	writeJSON(w, http.StatusOK, resp)
 }
