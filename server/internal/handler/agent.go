@@ -779,9 +779,10 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 //
 // Returns empty when work_dir is empty, or when stripping leaves nothing
 // (i.e. work_dir was exactly the user's home — rendering nothing is
-// preferable to a chip that says `<name>`). shortTaskID() must stay in
-// lock-step with server/internal/daemon/execenv/git.go:shortID because the
-// daemon uses that suffix for both readable path segments.
+// preferable to a chip that says `<name>`). taskDirSegment() must stay in
+// lock-step with server/internal/daemon/execenv/git.go:taskKey — both
+// consume the same task UUID. legacyTaskDirSegment keeps privacy-safe display
+// working for pre-#7347 roots and roots created by an earlier build of this PR.
 func relativeWorkDir(workDir, workspaceID, taskID string) string {
 	if workDir == "" {
 		return ""
@@ -793,8 +794,8 @@ func relativeWorkDir(workDir, workspaceID, taskID string) string {
 	if workspaceID != "" && taskID != "" {
 		parts := strings.Split(normalized, "/")
 		for i := 0; i+1 < len(parts); i++ {
-			if matchesStablePathSegment(parts[i], workspaceID, workspaceID) &&
-				matchesStablePathSegment(parts[i+1], taskID, shortTaskID(taskID)) {
+			if matchesWorkspacePathSegment(parts[i], workspaceID) &&
+				matchesTaskPathSegment(parts[i+1], taskID) {
 				return strings.Join(parts[i:], "/")
 			}
 		}
@@ -807,23 +808,49 @@ func relativeWorkDir(workDir, workspaceID, taskID string) string {
 	return basename(normalized)
 }
 
-func matchesStablePathSegment(segment, id, legacy string) bool {
-	if strings.EqualFold(segment, legacy) {
-		return true
-	}
-	return strings.HasSuffix(strings.ToLower(segment), "-"+shortTaskID(id))
+func matchesWorkspacePathSegment(segment, workspaceID string) bool {
+	lower := strings.ToLower(segment)
+	legacy := legacyTaskDirSegment(workspaceID)
+	current := strings.ToLower(taskDirSegment(workspaceID))
+	return strings.EqualFold(segment, workspaceID) ||
+		strings.HasSuffix(lower, "-"+legacy) || strings.HasSuffix(lower, "-"+current)
 }
 
-// shortTaskID mirrors execenv.shortID — first 8 hex chars of the UUID
-// with dashes stripped. Kept inline here so the agent handler has zero
-// imports from the daemon package (which would create an unwanted cycle
-// between handler and daemon).
-func shortTaskID(uuid string) string {
+func matchesTaskPathSegment(segment, taskID string) bool {
+	lower := strings.ToLower(segment)
+	legacy := legacyTaskDirSegment(taskID)
+	current := strings.ToLower(taskDirSegment(taskID))
+	return strings.EqualFold(segment, legacy) || strings.EqualFold(segment, current) ||
+		strings.HasSuffix(lower, "-"+legacy) || strings.HasSuffix(lower, "-"+current)
+}
+
+// taskDirSegmentLen and taskDirSegment mirror execenv.taskKeyLen /
+// execenv.taskKey — the LAST 12 hex chars of the task id. Kept inline here so
+// the agent handler has zero imports from the daemon package (which would
+// create an unwanted cycle between handler and daemon).
+//
+// It must keep taking the TAIL. A UUIDv7's leading hex chars are timestamp
+// bits shared by every task created within ~65.5s (#7326); the daemon stopped
+// reading from that end, and this reconstruction only matches while both sides
+// agree.
+const taskDirSegmentLen = 12
+
+func taskDirSegment(uuid string) string {
 	s := strings.ReplaceAll(uuid, "-", "")
-	if len(s) > 8 {
-		return s[:8]
+	if len(s) > taskDirSegmentLen {
+		return s[len(s)-taskDirSegmentLen:]
 	}
 	return s
+}
+
+// legacyTaskDirSegment mirrors the historical shortID layout: the first eight
+// dash-free characters. It is display compatibility only, never new identity.
+func legacyTaskDirSegment(uuid string) string {
+	s := strings.ReplaceAll(uuid, "-", "")
+	if len(s) > 8 {
+		return strings.ToLower(s[:8])
+	}
+	return strings.ToLower(s)
 }
 
 // homeDirPattern matches the well-known per-user home layouts on macOS,

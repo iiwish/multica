@@ -224,7 +224,7 @@ func TestScanDiskUsage_MixedLayoutsUseMetadataIdentity(t *testing.T) {
 		CompletedAt: time.Now().Add(-time.Hour),
 	})
 
-	readableDir := filepath.Join(root, "asset-feed-a05b0e10", "mul-6063-22222222")
+	readableDir := filepath.Join(root, "asset-feed-a548b2390cb2", "mul-6063-a548b2390cb2")
 	writeFile(t, filepath.Join(readableDir, "workdir", "readable.txt"), 20)
 	mustWriteMeta(t, readableDir, execenv.GCMeta{
 		Kind:        execenv.GCKindIssue,

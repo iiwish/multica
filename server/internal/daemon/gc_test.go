@@ -87,7 +87,7 @@ func TestRunGC_MixedLayoutsUseMetadataWorkspaceIdentity(t *testing.T) {
 		Kind: execenv.GCKindIssue, IssueID: legacyIssueID, WorkspaceID: workspaceID,
 		CompletedAt: time.Now().Add(-10 * 24 * time.Hour),
 	})
-	readableDir := createTaskDir(t, d.cfg.WorkspacesRoot, "asset-feed-a05b0e10", "mul-6063-22222222", &execenv.GCMeta{
+	readableDir := createTaskDir(t, d.cfg.WorkspacesRoot, "asset-feed-a548b2390cb2", "mul-6063-a548b2390cb2", &execenv.GCMeta{
 		Kind: execenv.GCKindIssue, IssueID: readableIssueID, WorkspaceID: workspaceID,
 		TaskID: "22222222-ee7a-4603-a72d-a548b2390cb2", CompletedAt: time.Now().Add(-10 * 24 * time.Hour),
 	})

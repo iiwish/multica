@@ -25,6 +25,10 @@ func TestRelativeWorkDir(t *testing.T) {
 	const (
 		wsID   = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
 		taskID = "5c57b65b-ee7a-4603-a72d-a548b2390cb2"
+		// The env-root segment is the TAIL of the task id, not a leading
+		// prefix: UUIDv7 puts a timestamp in front, so a leading slice is
+		// shared by every task created in the same ~65.5s window (#7326).
+		taskSeg = "a548b2390cb2"
 	)
 
 	tests := []struct {
@@ -43,24 +47,38 @@ func TestRelativeWorkDir(t *testing.T) {
 		},
 		{
 			name:     "standard envRoot path strips workspaces root",
-			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/5c57b65b/workdir",
+			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/" + taskSeg + "/workdir",
 			wsID:     wsID,
 			taskID:   taskID,
-			expected: wsID + "/5c57b65b/workdir",
+			expected: wsID + "/" + taskSeg + "/workdir",
 		},
 		{
 			name:     "standard envRoot path without trailing workdir",
-			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/5c57b65b",
+			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/" + taskSeg,
 			wsID:     wsID,
 			taskID:   taskID,
-			expected: wsID + "/5c57b65b",
+			expected: wsID + "/" + taskSeg,
 		},
 		{
 			name:     "readable envRoot path strips workspaces root",
+			workDir:  "/Users/alice/multica_workspaces/asset-feed-" + taskSeg + "/mul-6063-" + taskSeg + "/workdir",
+			wsID:     wsID,
+			taskID:   taskID,
+			expected: "asset-feed-" + taskSeg + "/mul-6063-" + taskSeg + "/workdir",
+		},
+		{
+			name:     "legacy readable envRoot keeps privacy-safe display",
 			workDir:  "/Users/alice/multica_workspaces/asset-feed-a05b0e10/mul-6063-5c57b65b/workdir",
 			wsID:     wsID,
 			taskID:   taskID,
 			expected: "asset-feed-a05b0e10/mul-6063-5c57b65b/workdir",
+		},
+		{
+			name:     "legacy opaque envRoot keeps privacy-safe display",
+			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/5c57b65b/workdir",
+			wsID:     wsID,
+			taskID:   taskID,
+			expected: wsID + "/5c57b65b/workdir",
 		},
 		{
 			name:     "local_directory path under /Users home is stripped",
@@ -141,31 +159,31 @@ func TestRelativeWorkDir(t *testing.T) {
 		},
 		{
 			name:     "Windows backslash separators are normalized",
-			workDir:  `C:\Users\alice\multica_workspaces\` + wsID + `\5c57b65b\workdir`,
+			workDir:  `C:\Users\alice\multica_workspaces\` + wsID + `\` + taskSeg + `\workdir`,
 			wsID:     wsID,
 			taskID:   taskID,
-			expected: wsID + "/5c57b65b/workdir",
+			expected: wsID + "/" + taskSeg + "/workdir",
 		},
 		{
 			name:     "missing workspace_id under home strips home prefix instead of envRoot",
-			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/5c57b65b/workdir",
+			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/" + taskSeg + "/workdir",
 			wsID:     "",
 			taskID:   taskID,
-			expected: "multica_workspaces/" + wsID + "/5c57b65b/workdir",
+			expected: "multica_workspaces/" + wsID + "/" + taskSeg + "/workdir",
 		},
 		{
 			name:     "missing task_id under home strips home prefix instead of envRoot",
-			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/5c57b65b/workdir",
+			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/" + taskSeg + "/workdir",
 			wsID:     wsID,
 			taskID:   "",
-			expected: "multica_workspaces/" + wsID + "/5c57b65b/workdir",
+			expected: "multica_workspaces/" + wsID + "/" + taskSeg + "/workdir",
 		},
 		{
 			name:     "trailing slash on envRoot path is preserved in returned suffix",
-			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/5c57b65b/workdir/",
+			workDir:  "/Users/alice/multica_workspaces/" + wsID + "/" + taskSeg + "/workdir/",
 			wsID:     wsID,
 			taskID:   taskID,
-			expected: wsID + "/5c57b65b/workdir/",
+			expected: wsID + "/" + taskSeg + "/workdir/",
 		},
 		{
 			name:     "wsID prefix appearing elsewhere falls back to basename when not under home",
@@ -211,8 +229,8 @@ func TestTaskToResponseDerivesPrivateDurableWorkDir(t *testing.T) {
 }
 
 // TestStableIDSuffixMatchesDaemon pins the handler's path validation to the
-// stable suffixes used by execenv.PredictRootDir for both legacy and readable
-// workdirs.
+// current readable suffixes used by execenv.PredictRootDir. The table above
+// separately pins compatibility with both historical layouts.
 func TestStableIDSuffixMatchesDaemon(t *testing.T) {
 	const (
 		workspacesRoot = "/tmp/workspaces"
@@ -226,7 +244,7 @@ func TestStableIDSuffixMatchesDaemon(t *testing.T) {
 		TaskID:          taskID,
 		IssueIdentifier: "MUL-6063",
 	})
-	expected := workspacesRoot + "/asset-feed-" + shortTaskID(workspaceID) + "/mul-6063-" + shortTaskID(taskID)
+	expected := workspacesRoot + "/asset-feed-" + taskDirSegment(workspaceID) + "/mul-6063-" + taskDirSegment(taskID)
 	if daemonRoot != expected {
 		t.Fatalf("daemon PredictRootDir = %q, handler-side suffix expectation = %q", daemonRoot, expected)
 	}

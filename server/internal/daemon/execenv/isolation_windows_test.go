@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,11 +93,13 @@ func TestPrepareIsolated_WindowsKillsDescendantBeforeRetry(t *testing.T) {
 		ready,
 	}
 	params := PrepareParams{
-		WorkspacesRoot: filepath.Join(dir, "workspaces"),
-		WorkspaceID:    "ws-windows-job",
-		TaskID:         "12345678-1111-2222-3333-444444444444",
-		Provider:       "claude",
-		Task:           TaskContextForEnv{IssueID: "issue-windows-job"},
+		WorkspacesRoot:  filepath.Join(dir, "workspaces"),
+		WorkspaceID:     "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
+		WorkspaceSlug:   strings.Repeat("workspace", 20),
+		TaskID:          "12345678-1111-7222-8333-444444444444",
+		IssueIdentifier: strings.Repeat("issue", 20),
+		Provider:        "claude",
+		Task:            TaskContextForEnv{IssueID: "issue-windows-job"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
