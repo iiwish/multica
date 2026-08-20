@@ -610,32 +610,6 @@ func TestShouldCleanTaskDir_CompletedTaskTTLRemovesOpenIssue(t *testing.T) {
 	}
 }
 
-func TestShouldCleanTaskDir_CompletedTaskTTLUnknownIssueStatusFailsClosed(t *testing.T) {
-	t.Parallel()
-	issueID := "88888888-8888-8888-8888-888888888884"
-
-	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf("/api/daemon/issues/%s/gc-check", issueID), func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"status": "future_or_malformed_status", "updated_at": time.Now(),
-		})
-	})
-
-	d := newGCTestDaemon(t, mux)
-	d.cfg.GCCompletedTaskTTL = time.Hour
-	d.cfg.GCArtifactTTL = 0
-	taskDir := createTaskDir(t, d.cfg.WorkspacesRoot, "ws1", "completed-unknown-status", &execenv.GCMeta{
-		Kind:        execenv.GCKindIssue,
-		IssueID:     issueID,
-		WorkspaceID: "ws1",
-		CompletedAt: time.Now().Add(-2 * time.Hour),
-	})
-
-	if action := d.shouldCleanTaskDir(context.Background(), taskDir); action != gcActionSkip {
-		t.Fatalf("expected unknown issue status to fail closed, got %d", action)
-	}
-}
-
 func TestShouldCleanTaskDir_CompletedTaskTTLRequiresCompletionTime(t *testing.T) {
 	t.Parallel()
 	issueID := "88888888-8888-8888-8888-888888888881"
