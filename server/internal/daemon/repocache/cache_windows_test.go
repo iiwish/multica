@@ -39,11 +39,11 @@ func TestIsolatedCheckoutIsCommittableOnWindows(t *testing.T) {
 	// segments. This needs a real Windows runner: Git creates the task branch as
 	// a nested file below .git/refs/heads, where MAX_PATH applies to the complete
 	// path and a too-generous readable prefix fails with "Filename too long".
-	workspacesRoot, err := os.MkdirTemp("", "multica-win-workspaces-")
-	if err != nil {
-		t.Fatalf("create short workspaces root: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(workspacesRoot) })
+	// Keep the base representative of the default user-level workspace root.
+	// t.TempDir embeds the full test name; nesting the production layout under
+	// it would spend that synthetic length twice and test the fixture, not the
+	// readable-path budget.
+	workspacesRoot := filepath.Join(os.TempDir(), "mw")
 	taskID := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 	envRoot := execenv.PredictRootDir(execenv.RootDirParams{
 		WorkspacesRoot:  workspacesRoot,
@@ -52,6 +52,10 @@ func TestIsolatedCheckoutIsCommittableOnWindows(t *testing.T) {
 		TaskID:          taskID,
 		IssueIdentifier: strings.Repeat("issue", 20),
 	})
+	if err := os.RemoveAll(envRoot); err != nil {
+		t.Fatalf("clear worst-case readable env root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(envRoot) })
 	workDir := filepath.Join(envRoot, "workdir")
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("create worst-case readable workdir: %v", err)
