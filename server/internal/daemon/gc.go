@@ -518,15 +518,16 @@ func (d *Daemon) gcDecisionIssueResult(taskDir string, meta *execenv.GCMeta, res
 
 	// Operators may opt into a hard retention bound for completed issue-task
 	// environments even while the parent issue stays open. A successful parent
-	// lookup is intentionally required: transient network/auth failures keep
-	// data rather than turning an unavailable status into a deletion signal.
+	// lookup with a recognized status is intentionally required: transient
+	// network/auth failures and response drift keep data rather than turning an
+	// unavailable or malformed status into a deletion signal.
 	// The active-root guard and reservation protect concurrent reuse. User-owned
 	// local_directory envs stay on the existing artifact-only policy so a shorter
 	// completed-task TTL cannot make artifact cleanup happen early.
 	if d.cfg.GCCompletedTaskTTL > 0 &&
 		!meta.LocalDirectory &&
 		!meta.CompletedAt.IsZero() &&
-		strings.TrimSpace(result.Status) != "" &&
+		isKnownIssueStatus(result.Status) &&
 		time.Since(meta.CompletedAt) > d.cfg.GCCompletedTaskTTL {
 		d.logger.Info("gc: completed task eligible for full cleanup",
 			"dir", filepath.Base(taskDir),
@@ -569,6 +570,18 @@ func (d *Daemon) gcDecisionIssueResult(taskDir string, meta *execenv.GCMeta, res
 	}
 
 	return gcActionSkip
+}
+
+// isKnownIssueStatus mirrors the issue status constraint enforced by the
+// server. Full task cleanup must fail closed when an older daemon receives a
+// future status or a malformed response from the GC check endpoint.
+func isKnownIssueStatus(status string) bool {
+	switch status {
+	case "backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func gcMetaFileAge(taskDir string) (time.Duration, bool) {
