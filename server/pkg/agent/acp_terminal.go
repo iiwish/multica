@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
+	"unicode/utf8"
 )
 
 const defaultACPOutputByteLimit = 50_000
@@ -17,13 +20,18 @@ const defaultACPOutputByteLimit = 50_000
 // terminal capability. Output is retained as a bounded tail, matching ACP's
 // truncation contract without allowing a command to grow memory unboundedly.
 type acpTerminal struct {
-	cmd       *exec.Cmd
-	mu        sync.Mutex
-	output    []byte
-	limit     int
-	truncated bool
-	done      chan struct{}
-	exitCode  *int
+	cmd        *exec.Cmd
+	mu         sync.Mutex
+	output     []byte
+	limit      int
+	truncated  bool
+	done       chan struct{}
+	exitStatus *acpTerminalExitStatus
+}
+
+type acpTerminalExitStatus struct {
+	exitCode *uint32
+	signal   *string
 }
 
 type acpTerminalOutputWriter struct {
@@ -36,16 +44,47 @@ func (w acpTerminalOutputWriter) Write(p []byte) (int, error) {
 
 	w.terminal.output = append(w.terminal.output, p...)
 	if w.terminal.limit > 0 && len(w.terminal.output) > w.terminal.limit {
-		w.terminal.output = append([]byte(nil), w.terminal.output[len(w.terminal.output)-w.terminal.limit:]...)
+		start := len(w.terminal.output) - w.terminal.limit
+		// ACP output is a string, so truncation must never retain the tail of
+		// a rune whose leading byte was discarded.
+		for start < len(w.terminal.output) && !utf8.RuneStart(w.terminal.output[start]) {
+			start++
+		}
+		w.terminal.output = append([]byte(nil), w.terminal.output[start:]...)
 		w.terminal.truncated = true
 	}
 	return len(p), nil
 }
 
-func (t *acpTerminal) snapshot() (output string, truncated bool, exitCode *int) {
+func (t *acpTerminal) snapshot() (output string, truncated bool, exitStatus *acpTerminalExitStatus) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return string(append([]byte(nil), t.output...)), t.truncated, t.exitCode
+
+	raw := append([]byte(nil), t.output...)
+	// A pipe read may split a multibyte rune across Write calls. Do not expose
+	// that incomplete suffix; a later snapshot will include it once complete.
+	if len(raw) > 0 {
+		lastRune := len(raw) - 1
+		for lastRune > 0 && !utf8.RuneStart(raw[lastRune]) {
+			lastRune--
+		}
+		if !utf8.FullRune(raw[lastRune:]) {
+			raw = raw[:lastRune]
+		}
+	}
+	valid := bytes.ToValidUTF8(raw, []byte("\uFFFD"))
+	if t.limit > 0 && len(valid) > t.limit {
+		start := len(valid) - t.limit
+		for start < len(valid) && !utf8.RuneStart(valid[start]) {
+			start++
+		}
+		valid = valid[start:]
+	}
+	if t.exitStatus != nil {
+		status := *t.exitStatus
+		exitStatus = &status
+	}
+	return string(valid), t.truncated, exitStatus
 }
 
 func (t *acpTerminal) wait() {
@@ -65,16 +104,7 @@ func (t *acpTerminal) kill() error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	if err := cmd.Process.Kill(); err != nil {
-		// A process can exit between the done check and Kill. Treat that race
-		// as a successful kill; the terminal already has its final status.
-		select {
-		case <-t.done:
-			return nil
-		default:
-		}
-		return err
-	}
+	signalProcessGroup(cmd, syscall.SIGKILL)
 	return nil
 }
 
@@ -114,11 +144,17 @@ func (c *hermesClient) acpTerminalCreate(params json.RawMessage) (map[string]any
 
 	var cmd *exec.Cmd
 	if len(p.Args) > 0 {
-		cmd = exec.CommandContext(c.terminalContext(), p.Command, p.Args...)
+		cmd = NewCommand(p.Command, nil).exec(c.terminalContext(), p.Args...)
 	} else if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(c.terminalContext(), "cmd.exe", "/d", "/s", "/c", p.Command)
+		cmd = NewCommand("cmd.exe", nil).exec(c.terminalContext(), "/d", "/s", "/c", p.Command)
 	} else {
-		cmd = exec.CommandContext(c.terminalContext(), "/bin/sh", "-c", p.Command)
+		cmd = NewCommand("/bin/sh", nil).exec(c.terminalContext(), "-c", p.Command)
+	}
+	hideAgentWindow(cmd)
+	configureProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		signalProcessGroup(cmd, syscall.SIGKILL)
+		return nil
 	}
 	cmd.Dir = cwd
 	cmd.Env = env
@@ -131,7 +167,7 @@ func (c *hermesClient) acpTerminalCreate(params json.RawMessage) (map[string]any
 	writer := acpTerminalOutputWriter{terminal: t}
 	cmd.Stdout = writer
 	cmd.Stderr = writer
-	if err := cmd.Start(); err != nil {
+	if err := startOwnedProcessTree(cmd, c.cfg.Logger); err != nil {
 		return nil, fmt.Errorf("terminal/create start: %w", err)
 	}
 
@@ -144,17 +180,22 @@ func (c *hermesClient) acpTerminalCreate(params json.RawMessage) (map[string]any
 	c.terminalMu.Unlock()
 
 	go func() {
+		defer releaseProcessGroup(cmd)
 		err := cmd.Wait()
-		var code int
+		status := &acpTerminalExitStatus{}
 		if err == nil {
-			code = 0
+			code := uint32(0)
+			status.exitCode = &code
 		} else if exitErr, ok := err.(*exec.ExitError); ok {
-			code = exitErr.ExitCode()
-		} else {
-			code = -1
+			if code := exitErr.ExitCode(); code >= 0 {
+				exitCode := uint32(code)
+				status.exitCode = &exitCode
+			} else {
+				status.signal = acpProcessExitSignal(exitErr.ProcessState)
+			}
 		}
 		t.mu.Lock()
-		t.exitCode = &code
+		t.exitStatus = status
 		t.mu.Unlock()
 		close(t.done)
 	}()
@@ -218,19 +259,19 @@ func (c *hermesClient) acpTerminalResponse(method string, params json.RawMessage
 
 	switch method {
 	case "terminal/output":
-		output, truncated, exitCode := t.snapshot()
+		output, truncated, exitStatus := t.snapshot()
 		result := map[string]any{"output": output, "truncated": truncated}
-		if exitCode != nil {
-			result["exitStatus"] = map[string]any{"exitCode": *exitCode, "signal": nil}
+		if exitStatus != nil {
+			result["exitStatus"] = acpTerminalExitStatusResult(exitStatus)
 		}
 		return result, nil
 	case "terminal/wait_for_exit":
 		t.wait()
-		_, _, exitCode := t.snapshot()
-		if exitCode == nil {
+		_, _, exitStatus := t.snapshot()
+		if exitStatus == nil {
 			return nil, fmt.Errorf("terminal %q exited without status", p.TerminalID)
 		}
-		return map[string]any{"exitCode": *exitCode, "signal": nil}, nil
+		return acpTerminalExitStatusResult(exitStatus), nil
 	case "terminal/kill":
 		if err := t.kill(); err != nil {
 			return nil, fmt.Errorf("kill terminal %q: %w", p.TerminalID, err)
@@ -241,4 +282,15 @@ func (c *hermesClient) acpTerminalResponse(method string, params json.RawMessage
 	default:
 		return nil, fmt.Errorf("unsupported terminal method %q", method)
 	}
+}
+
+func acpTerminalExitStatusResult(status *acpTerminalExitStatus) map[string]any {
+	result := map[string]any{"exitCode": nil, "signal": nil}
+	if status.exitCode != nil {
+		result["exitCode"] = int(*status.exitCode)
+	}
+	if status.signal != nil {
+		result["signal"] = *status.signal
+	}
+	return result
 }
