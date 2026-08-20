@@ -8,16 +8,16 @@ import (
 	"testing"
 )
 
-func createAutopilotChildIssue(t *testing.T, workerID, parentIssueID, status, actorAgentID, taskID string) (*httptest.ResponseRecorder, IssueResponse) {
+func createAutopilotChildIssue(t *testing.T, assigneeType, assigneeID, parentIssueID, status, actorAgentID, taskID string) (*httptest.ResponseRecorder, IssueResponse) {
 	t.Helper()
 
 	w := httptest.NewRecorder()
 	r := newRequest(http.MethodPost, "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":           "autopilot private-worker child " + t.Name(),
+		"title":           "autopilot private-assignee child " + t.Name(),
 		"status":          status,
 		"priority":        "low",
-		"assignee_type":   "agent",
-		"assignee_id":     workerID,
+		"assignee_type":   assigneeType,
+		"assignee_id":     assigneeID,
 		"parent_issue_id": parentIssueID,
 		"allow_duplicate": true,
 	})
@@ -52,7 +52,7 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 		fx := newAutopilotDelegationFixture(t, workerID, ownerID, "autopilot")
 		parentIssueID := uuidToString(fx.Issue.ID)
 
-		w, created := createAutopilotChildIssue(t, workerID, parentIssueID, "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
+		w, created := createAutopilotChildIssue(t, "agent", workerID, parentIssueID, "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
 		if w.Code != http.StatusCreated {
 			t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
 		}
@@ -79,7 +79,7 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 		workerID, ownerID, _ := privateAgentTestFixture(t)
 		fx := newAutopilotDelegationFixture(t, workerID, ownerID, "autopilot")
 
-		w, created := createAutopilotChildIssue(t, workerID, uuidToString(fx.Issue.ID), "todo", fx.LeaderAgentID, fx.LeaderTaskID)
+		w, created := createAutopilotChildIssue(t, "agent", workerID, uuidToString(fx.Issue.ID), "todo", fx.LeaderAgentID, fx.LeaderTaskID)
 		if w.Code != http.StatusCreated {
 			t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
 		}
@@ -100,11 +100,42 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 		}
 	})
 
+	t.Run("verified lineage creates squad child and enqueues its private leader once", func(t *testing.T) {
+		workerID, ownerID, _ := privateAgentTestFixture(t)
+		fx := newAutopilotDelegationFixture(t, workerID, ownerID, "autopilot")
+		squadID := dbfx.Squad(t, "Autopilot Private Leader Squad", workerID)
+
+		w, created := createAutopilotChildIssue(t, "squad", squadID, uuidToString(fx.Issue.ID), "todo", fx.LeaderAgentID, fx.LeaderTaskID)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+		}
+		if created.AssigneeType == nil || *created.AssigneeType != "squad" || created.AssigneeID == nil || *created.AssigneeID != squadID {
+			t.Fatalf("created child assignee = (%v, %v), want (squad, %s)", created.AssigneeType, created.AssigneeID, squadID)
+		}
+
+		var taskCount int
+		var originatorCount int
+		var squadTaskCount int
+		if err := testPool.QueryRow(context.Background(), `
+			SELECT count(*), count(originator_user_id), count(*) FILTER (WHERE squad_id = $3)
+			FROM agent_task_queue
+			WHERE issue_id = $1 AND agent_id = $2
+		`, created.ID, workerID, squadID).Scan(&taskCount, &originatorCount, &squadTaskCount); err != nil {
+			t.Fatalf("count private squad leader tasks: %v", err)
+		}
+		if taskCount != 1 || squadTaskCount != 1 {
+			t.Fatalf("active squad child must enqueue its private leader exactly once with squad lineage, got %d tasks (%d with squad_id)", taskCount, squadTaskCount)
+		}
+		if originatorCount != 0 {
+			t.Fatal("autopilot creator authority is authorization-only; squad leader task must remain unattributed")
+		}
+	})
+
 	t.Run("creator without invoke rights is denied", func(t *testing.T) {
 		workerID, _, plainMemberID := privateAgentTestFixture(t)
 		fx := newAutopilotDelegationFixture(t, workerID, plainMemberID, "autopilot")
 
-		w, _ := createAutopilotChildIssue(t, workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
+		w, _ := createAutopilotChildIssue(t, "agent", workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("CreateIssue: expected 403, got %d: %s", w.Code, w.Body.String())
 		}
@@ -121,7 +152,7 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 			t.Fatalf("attribute leader task: %v", err)
 		}
 
-		w, _ := createAutopilotChildIssue(t, workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
+		w, _ := createAutopilotChildIssue(t, "agent", workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("CreateIssue: expected 403, got %d: %s", w.Code, w.Body.String())
 		}
@@ -131,7 +162,7 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 		workerID, ownerID, _ := privateAgentTestFixture(t)
 		fx := newAutopilotDelegationFixture(t, workerID, ownerID, "autopilot")
 
-		w, _ := createAutopilotChildIssue(t, workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, "")
+		w, _ := createAutopilotChildIssue(t, "agent", workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, "")
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("CreateIssue: expected 403, got %d: %s", w.Code, w.Body.String())
 		}
@@ -142,7 +173,7 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 		fx := newAutopilotDelegationFixture(t, workerID, ownerID, "autopilot")
 		workerTaskID := seedTaskOnIssue(t, workerID, uuidToString(fx.Issue.ID), fx.RuntimeID)
 
-		w, _ := createAutopilotChildIssue(t, workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, workerTaskID)
+		w, _ := createAutopilotChildIssue(t, "agent", workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, workerTaskID)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("CreateIssue: expected 403, got %d: %s", w.Code, w.Body.String())
 		}
@@ -154,7 +185,7 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 		otherIssueID := seedBareIssue(t, fx.LeaderAgentID)
 		otherTaskID := seedTaskOnIssue(t, fx.LeaderAgentID, otherIssueID, fx.RuntimeID)
 
-		w, _ := createAutopilotChildIssue(t, workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, otherTaskID)
+		w, _ := createAutopilotChildIssue(t, "agent", workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, otherTaskID)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("CreateIssue: expected 403, got %d: %s", w.Code, w.Body.String())
 		}
@@ -164,7 +195,7 @@ func TestCreateIssue_AutopilotLeaderAssignsPrivateWorker(t *testing.T) {
 		workerID, ownerID, _ := privateAgentTestFixture(t)
 		fx := newAutopilotDelegationFixture(t, workerID, ownerID, "")
 
-		w, _ := createAutopilotChildIssue(t, workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
+		w, _ := createAutopilotChildIssue(t, "agent", workerID, uuidToString(fx.Issue.ID), "backlog", fx.LeaderAgentID, fx.LeaderTaskID)
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("CreateIssue: expected 403, got %d: %s", w.Code, w.Body.String())
 		}
