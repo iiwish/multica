@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/runtimeapps"
@@ -35,10 +36,12 @@ type ProjectResourceForEnv struct {
 
 // PrepareParams holds all inputs needed to set up an execution environment.
 type PrepareParams struct {
-	WorkspacesRoot string // base path for all envs (e.g., ~/multica_workspaces)
-	WorkspaceID    string // workspace UUID — tasks are grouped under this
-	TaskID         string // task UUID — used for directory name
-	AgentName      string // for git branch naming only
+	WorkspacesRoot  string // base path for all envs (e.g., ~/multica_workspaces)
+	WorkspaceID     string // workspace UUID — stable identity and path suffix
+	WorkspaceSlug   string // human-readable workspace path prefix
+	TaskID          string // task UUID — stable identity and path suffix
+	IssueIdentifier string // human-readable issue key (e.g. MUL-6063); empty for non-issue tasks
+	AgentName       string // for git branch naming only
 	// Profile is the daemon's profile name (empty = default). It namespaces the
 	// per-issue Codex session store so a second profile-daemon sharing the same
 	// ~/.codex cannot see or GC this daemon's stores (MUL-4424).
@@ -311,14 +314,54 @@ type Environment struct {
 	logger *slog.Logger // for cleanup logging
 }
 
+// RootDirParams is the identity and display data used to derive a new task's
+// environment root. IDs provide stable collision-safe suffixes; user-controlled
+// labels are only readable prefixes and never serve as identity.
+type RootDirParams struct {
+	WorkspacesRoot  string
+	WorkspaceID     string
+	WorkspaceSlug   string
+	TaskID          string
+	IssueIdentifier string
+}
+
+const readablePathSegmentMax = 48
+
 // PredictRootDir returns the env root path that Prepare would create for the
 // given task, without performing any I/O. Callers use this to claim ownership
 // of the directory (e.g. against the GC loop) before Prepare/Reuse runs.
-func PredictRootDir(workspacesRoot, workspaceID, taskID string) string {
-	if workspacesRoot == "" || workspaceID == "" || taskID == "" {
+func PredictRootDir(params RootDirParams) string {
+	if params.WorkspacesRoot == "" || params.WorkspaceID == "" || params.TaskID == "" {
 		return ""
 	}
-	return filepath.Join(workspacesRoot, workspaceID, shortID(taskID))
+	return filepath.Join(
+		params.WorkspacesRoot,
+		readablePathSegment(params.WorkspaceSlug, "workspace", params.WorkspaceID),
+		readablePathSegment(params.IssueIdentifier, "task", params.TaskID),
+	)
+}
+
+// readablePathSegment converts a user-controlled label into a bounded,
+// lowercase ASCII prefix and appends the stable ID suffix. The suffix keeps
+// paths distinct when labels differ only by case, sanitize to the same value,
+// or change later.
+func readablePathSegment(label, fallback, id string) string {
+	prefix := strings.ToLower(strings.TrimSpace(label))
+	prefix = nonAlphanumeric.ReplaceAllString(prefix, "-")
+	prefix = strings.Trim(prefix, "-")
+	if prefix == "" {
+		prefix = fallback
+	}
+
+	suffix := strings.ToLower(shortID(id))
+	maxPrefix := readablePathSegmentMax - len(suffix) - 1
+	if len(prefix) > maxPrefix {
+		prefix = strings.TrimRight(prefix[:maxPrefix], "-")
+	}
+	if prefix == "" {
+		prefix = fallback
+	}
+	return prefix + "-" + suffix
 }
 
 // Prepare creates an isolated execution environment for a task.
@@ -335,7 +378,13 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		return nil, fmt.Errorf("execenv: task ID is required")
 	}
 
-	envRoot := filepath.Join(params.WorkspacesRoot, params.WorkspaceID, shortID(params.TaskID))
+	envRoot := PredictRootDir(RootDirParams{
+		WorkspacesRoot:  params.WorkspacesRoot,
+		WorkspaceID:     params.WorkspaceID,
+		WorkspaceSlug:   params.WorkspaceSlug,
+		TaskID:          params.TaskID,
+		IssueIdentifier: params.IssueIdentifier,
+	})
 
 	// Self-heal the root-level daemon marker on every task start so a marker
 	// removed while the daemon runs is restored before the agent spawns. The
@@ -932,7 +981,10 @@ const (
 
 // GCMeta is persisted to .gc_meta.json inside the env root so the GC loop
 // can decide whether the directory is reclaimable. It is a discriminated
-// union keyed on Kind: only the ID field matching Kind is meaningful.
+// union keyed on Kind: only the parent ID field matching Kind is meaningful.
+// TaskID is also persisted for every new task so local reports never need to
+// recover task identity from the directory name; for quick-create it doubles
+// as the parent ID used by the GC status endpoint.
 //
 // Older meta files (pre-v2) lack the Kind field; readers must default empty
 // Kind to GCKindIssue for backward compatibility — only IssueID was written

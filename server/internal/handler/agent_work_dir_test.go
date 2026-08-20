@@ -56,6 +56,13 @@ func TestRelativeWorkDir(t *testing.T) {
 			expected: wsID + "/5c57b65b",
 		},
 		{
+			name:     "readable envRoot path strips workspaces root",
+			workDir:  "/Users/alice/multica_workspaces/asset-feed-a05b0e10/mul-6063-5c57b65b/workdir",
+			wsID:     wsID,
+			taskID:   taskID,
+			expected: "asset-feed-a05b0e10/mul-6063-5c57b65b/workdir",
+		},
+		{
 			name:     "local_directory path under /Users home is stripped",
 			workDir:  "/Users/df007df/repos/foo",
 			wsID:     wsID,
@@ -203,22 +210,24 @@ func TestTaskToResponseDerivesPrivateDurableWorkDir(t *testing.T) {
 	}
 }
 
-// TestShortTaskIDMatchesDaemon pins shortTaskID() to execenv.PredictRootDir's
-// path layout. Both helpers consume the same task UUID; if the daemon's
-// shortID logic drifts, this test trips loudly instead of letting the UI
-// silently fall back to the "tail two segments" branch. Without this guard,
-// a daemon-side change to, say, a 12-char prefix would not break a build —
-// it would just quietly degrade every standard-task work_dir chip into the
-// local_directory fallback.
-func TestShortTaskIDMatchesDaemon(t *testing.T) {
+// TestStableIDSuffixMatchesDaemon pins the handler's path validation to the
+// stable suffixes used by execenv.PredictRootDir for both legacy and readable
+// workdirs.
+func TestStableIDSuffixMatchesDaemon(t *testing.T) {
 	const (
 		workspacesRoot = "/tmp/workspaces"
 		workspaceID    = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
 		taskID         = "5c57b65b-ee7a-4603-a72d-a548b2390cb2"
 	)
-	daemonRoot := execenv.PredictRootDir(workspacesRoot, workspaceID, taskID)
-	expected := workspacesRoot + "/" + workspaceID + "/" + shortTaskID(taskID)
+	daemonRoot := execenv.PredictRootDir(execenv.RootDirParams{
+		WorkspacesRoot:  workspacesRoot,
+		WorkspaceID:     workspaceID,
+		WorkspaceSlug:   "asset-feed",
+		TaskID:          taskID,
+		IssueIdentifier: "MUL-6063",
+	})
+	expected := workspacesRoot + "/asset-feed-" + shortTaskID(workspaceID) + "/mul-6063-" + shortTaskID(taskID)
 	if daemonRoot != expected {
-		t.Fatalf("daemon PredictRootDir = %q, handler-side reconstruction = %q — shortTaskID is out of sync with execenv.shortID", daemonRoot, expected)
+		t.Fatalf("daemon PredictRootDir = %q, handler-side suffix expectation = %q", daemonRoot, expected)
 	}
 }

@@ -207,6 +207,57 @@ func TestScanDiskUsage_AggregatesAndCategorizes(t *testing.T) {
 	}
 }
 
+func TestScanDiskUsage_MixedLayoutsUseMetadataIdentity(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workspaceID := "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
+	legacyTaskID := "11111111-ee7a-4603-a72d-a548b2390cb2"
+	readableTaskID := "22222222-ee7a-4603-a72d-a548b2390cb2"
+
+	legacyDir := filepath.Join(root, workspaceID, ShortID(legacyTaskID))
+	writeFile(t, filepath.Join(legacyDir, "workdir", "legacy.txt"), 10)
+	mustWriteMeta(t, legacyDir, execenv.GCMeta{
+		Kind:        execenv.GCKindIssue,
+		IssueID:     "issue-legacy",
+		WorkspaceID: workspaceID,
+		CompletedAt: time.Now().Add(-time.Hour),
+	})
+
+	readableDir := filepath.Join(root, "asset-feed-a05b0e10", "mul-6063-22222222")
+	writeFile(t, filepath.Join(readableDir, "workdir", "readable.txt"), 20)
+	mustWriteMeta(t, readableDir, execenv.GCMeta{
+		Kind:        execenv.GCKindIssue,
+		IssueID:     "issue-readable",
+		TaskID:      readableTaskID,
+		WorkspaceID: workspaceID,
+		CompletedAt: time.Now().Add(-time.Hour),
+	})
+
+	report, err := ScanDiskUsage(root, nil)
+	if err != nil {
+		t.Fatalf("ScanDiskUsage: %v", err)
+	}
+	if report.TotalTaskCount != 2 || report.TotalWorkspaceCount != 1 {
+		t.Fatalf("totals = tasks:%d workspaces:%d, want 2/1", report.TotalTaskCount, report.TotalWorkspaceCount)
+	}
+	for _, task := range report.Tasks {
+		if task.WorkspaceID != workspaceID {
+			t.Errorf("task %q workspace_id = %q, want metadata id %q", task.Path, task.WorkspaceID, workspaceID)
+		}
+	}
+	byShort := map[string]TaskDiskUsage{}
+	for _, task := range report.Tasks {
+		byShort[task.TaskShort] = task
+	}
+	if _, ok := byShort[ShortID(legacyTaskID)]; !ok {
+		t.Errorf("legacy task was not reported under path-derived short id")
+	}
+	if _, ok := byShort[ShortID(readableTaskID)]; !ok {
+		t.Errorf("readable task was not reported under metadata task id")
+	}
+}
+
 func TestScanDiskUsage_ManagedCodexSandboxIsExactAndDeduplicated(t *testing.T) {
 	t.Parallel()
 

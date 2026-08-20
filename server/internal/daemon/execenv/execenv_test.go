@@ -40,19 +40,50 @@ func TestShortID(t *testing.T) {
 
 func TestPredictRootDir(t *testing.T) {
 	t.Parallel()
-	got := PredictRootDir("/root", "ws-uuid", "a1b2c3d4-e5f6-7890-abcd-ef1234567890")
-	want := filepath.Join("/root", "ws-uuid", "a1b2c3d4")
+	got := PredictRootDir(RootDirParams{
+		WorkspacesRoot:  "/root",
+		WorkspaceID:     "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
+		WorkspaceSlug:   "Asset Feed",
+		TaskID:          "5c57b65b-ee7a-4603-a72d-a548b2390cb2",
+		IssueIdentifier: "MUL-6063",
+	})
+	want := filepath.Join("/root", "asset-feed-a05b0e10", "mul-6063-5c57b65b")
 	if got != want {
 		t.Errorf("PredictRootDir = %q, want %q", got, want)
 	}
-	if got := PredictRootDir("", "ws", "task"); got != "" {
+	if got := PredictRootDir(RootDirParams{WorkspaceID: "ws", TaskID: "task"}); got != "" {
 		t.Errorf("expected empty when workspaces root missing, got %q", got)
 	}
-	if got := PredictRootDir("/r", "", "task"); got != "" {
+	if got := PredictRootDir(RootDirParams{WorkspacesRoot: "/r", TaskID: "task"}); got != "" {
 		t.Errorf("expected empty when workspace ID missing, got %q", got)
 	}
-	if got := PredictRootDir("/r", "ws", ""); got != "" {
+	if got := PredictRootDir(RootDirParams{WorkspacesRoot: "/r", WorkspaceID: "ws"}); got != "" {
 		t.Errorf("expected empty when task ID missing, got %q", got)
+	}
+}
+
+func TestReadablePathSegmentSanitizesUserControlledLabels(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		label    string
+		fallback string
+		id       string
+		want     string
+	}{
+		{name: "separators and traversal", label: `../Asset\\Feed/Team`, fallback: "workspace", id: "a05b0e10-ee7a-4603-a72d-a548b2390cb2", want: "asset-feed-team-a05b0e10"},
+		{name: "non ascii removed", label: "日本語 Product", fallback: "workspace", id: "a05b0e10-ee7a-4603-a72d-a548b2390cb2", want: "product-a05b0e10"},
+		{name: "case normalized", label: "MUL-6063", fallback: "task", id: "5c57b65b-ee7a-4603-a72d-a548b2390cb2", want: "mul-6063-5c57b65b"},
+		{name: "empty label falls back", label: "...", fallback: "task", id: "5c57b65b-ee7a-4603-a72d-a548b2390cb2", want: "task-5c57b65b"},
+		{name: "label is bounded", label: strings.Repeat("a", 100), fallback: "task", id: "5c57b65b-ee7a-4603-a72d-a548b2390cb2", want: strings.Repeat("a", 39) + "-5c57b65b"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := readablePathSegment(tt.label, tt.fallback, tt.id); got != tt.want {
+				t.Fatalf("readablePathSegment(%q) = %q, want %q", tt.label, got, tt.want)
+			}
+		})
 	}
 }
 

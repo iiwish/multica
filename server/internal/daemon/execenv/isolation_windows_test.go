@@ -136,7 +136,7 @@ func TestPrepareIsolated_WindowsKillsDescendantBeforeRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("immediate retry PrepareIsolated: %v", err)
 	}
-	if env == nil || env.RootDir != PredictRootDir(params.WorkspacesRoot, params.WorkspaceID, params.TaskID) {
+	if env == nil || env.RootDir != PredictRootDir(RootDirParams{WorkspacesRoot: params.WorkspacesRoot, WorkspaceID: params.WorkspaceID, WorkspaceSlug: params.WorkspaceSlug, TaskID: params.TaskID, IssueIdentifier: params.IssueIdentifier}) {
 		t.Fatalf("retry environment = %#v, want the predicted root", env)
 	}
 }

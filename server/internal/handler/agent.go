@@ -314,6 +314,8 @@ type AgentTaskResponse struct {
 	RuntimeID            string                 `json:"runtime_id"`
 	IssueID              string                 `json:"issue_id"`
 	WorkspaceID          string                 `json:"workspace_id"`
+	WorkspaceSlug        string                 `json:"workspace_slug,omitempty"`
+	IssueIdentifier      string                 `json:"issue_identifier,omitempty"`
 	RemoteMCPConnections []remotemcp.Connection `json:"remote_mcp_connections,omitempty"`
 	// PluginHookTools are the workspace's agent-trigger plugin hooks, which the
 	// daemon renders as MCP tools for this task. Resolved at claim time so
@@ -363,8 +365,8 @@ type AgentTaskResponse struct {
 	PriorSessionResumeUnavailable bool   `json:"prior_session_resume_unavailable,omitempty"`
 	WorkDir                       string `json:"work_dir,omitempty"` // local working directory pinned for this task; populated once the daemon reports it
 	// RelativeWorkDir is a privacy-safe display form of WorkDir intended for
-	// the UI. For standard tasks it strips the daemon's workspaces root so
-	// the user sees `<wsUUID>/<taskShort>/workdir`; for local_directory
+	// the UI. For standard tasks it strips the daemon's workspaces root while
+	// preserving either the legacy or readable workspace/task segments; for local_directory
 	// tasks the absolute path lives outside the envRoot layout, so we strip
 	// recognised home-directory prefixes (`/Users/<name>/`, `/home/<name>/`,
 	// `<drive>:/Users/<name>/`) and otherwise fall back to the basename so
@@ -762,9 +764,11 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 // rendered in transcripts that frequently end up in screen shares,
 // screenshots, and recordings, so this function is the only guard.
 //
-//   - For standard tasks (work_dir laid out as `<workspacesRoot>/<wsUUID>/
-//     <taskShort>/workdir` by execenv.Prepare), it strips everything up to and
-//     including the workspaces root, returning `<wsUUID>/<taskShort>/workdir`.
+//   - For standard tasks, it validates the adjacent workspace/task segments
+//     by their stable ID suffixes, then strips everything before them. This
+//     accepts both legacy `<wsUUID>/<taskShort>` roots and readable
+//     `<workspaceSlug>-<wsShort>/<issueKey>-<taskShort>` roots without treating
+//     the labels as identity.
 //   - For local_directory tasks the absolute path lives outside the envRoot
 //     layout. We try to recognise common home-directory prefixes
 //     (`/Users/<name>/`, `/home/<name>/`, `<drive>:/Users/<name>/`) and strip
@@ -776,9 +780,8 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 // Returns empty when work_dir is empty, or when stripping leaves nothing
 // (i.e. work_dir was exactly the user's home — rendering nothing is
 // preferable to a chip that says `<name>`). shortTaskID() must stay in
-// lock-step with server/internal/daemon/execenv/git.go:shortID — both
-// consume the same task UUID; if that helper changes, this one must too
-// or the envRoot match silently degrades to the local_directory fallback.
+// lock-step with server/internal/daemon/execenv/git.go:shortID because the
+// daemon uses that suffix for both readable path segments.
 func relativeWorkDir(workDir, workspaceID, taskID string) string {
 	if workDir == "" {
 		return ""
@@ -788,9 +791,12 @@ func relativeWorkDir(workDir, workspaceID, taskID string) string {
 	normalized := strings.ReplaceAll(workDir, "\\", "/")
 
 	if workspaceID != "" && taskID != "" {
-		envRootSuffix := workspaceID + "/" + shortTaskID(taskID)
-		if idx := strings.Index(normalized, envRootSuffix); idx >= 0 {
-			return normalized[idx:]
+		parts := strings.Split(normalized, "/")
+		for i := 0; i+1 < len(parts); i++ {
+			if matchesStablePathSegment(parts[i], workspaceID, workspaceID) &&
+				matchesStablePathSegment(parts[i+1], taskID, shortTaskID(taskID)) {
+				return strings.Join(parts[i:], "/")
+			}
 		}
 	}
 
@@ -799,6 +805,13 @@ func relativeWorkDir(workDir, workspaceID, taskID string) string {
 	}
 
 	return basename(normalized)
+}
+
+func matchesStablePathSegment(segment, id, legacy string) bool {
+	if strings.EqualFold(segment, legacy) {
+		return true
+	}
+	return strings.HasSuffix(strings.ToLower(segment), "-"+shortTaskID(id))
 }
 
 // shortTaskID mirrors execenv.shortID — first 8 hex chars of the UUID

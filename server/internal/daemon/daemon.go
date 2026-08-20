@@ -5064,7 +5064,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	// reportTaskResult and execenv.WriteGCMeta below. markActiveEnvRoot
 	// is reference-counted, so the duplicate marks runTask installs are
 	// correctly nested within these.
-	predictedEnvRoot := execenv.PredictRootDir(d.cfg.WorkspacesRoot, task.WorkspaceID, task.ID)
+	predictedEnvRoot := execenv.PredictRootDir(taskRootDirParams(d.cfg.WorkspacesRoot, task))
 	if predictedEnvRoot != "" {
 		d.markActiveEnvRoot(predictedEnvRoot)
 		defer d.unmarkActiveEnvRoot(predictedEnvRoot)
@@ -5574,7 +5574,7 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 // internal task with no IDs at all). The caller skips writing a meta file
 // in that case so the directory falls back to mtime-based orphan cleanup.
 func gcMetaForTask(task Task) (execenv.GCMeta, bool) {
-	meta := execenv.GCMeta{WorkspaceID: task.WorkspaceID}
+	meta := execenv.GCMeta{WorkspaceID: task.WorkspaceID, TaskID: task.ID}
 	switch {
 	case task.ChatSessionID != "":
 		meta.Kind = execenv.GCKindChat
@@ -5596,6 +5596,16 @@ func gcMetaForTask(task Task) (execenv.GCMeta, bool) {
 		return execenv.GCMeta{}, false
 	}
 	return meta, true
+}
+
+func taskRootDirParams(workspacesRoot string, task Task) execenv.RootDirParams {
+	return execenv.RootDirParams{
+		WorkspacesRoot:  workspacesRoot,
+		WorkspaceID:     task.WorkspaceID,
+		WorkspaceSlug:   task.WorkspaceSlug,
+		TaskID:          task.ID,
+		IssueIdentifier: task.IssueIdentifier,
+	}
 }
 
 // runtimeDisplayNameOverrides maps a provider key to the human-facing runtime
@@ -5740,7 +5750,7 @@ func sessionHomeReachable(provider string, env *execenv.Environment, envReused b
 // shouldReusePriorWorkdir keeps the local_directory lock and cross-agent
 // isolation invariants without forcing managed follow-ups onto a fresh
 // provider session. Every managed issue or chat task may reuse only directories
-// that resolve to the {workspace}/{task}/workdir shape, carry Prepare-time
+// that resolve to the two-segment managed root shape, carry Prepare-time
 // managed-env provenance for the same workspace/scope/agent, and carry a
 // matching daemon task-context marker. Other task kinds have no durable scope
 // with which to prove ownership and therefore start fresh.
@@ -5775,7 +5785,7 @@ func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignmen
 		return false
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) != 3 || parts[0] != task.WorkspaceID || parts[1] == "" || parts[2] != "workdir" {
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "workdir" {
 		return false
 	}
 	if task.AgentID == "" || (task.IssueID == "" && task.ChatSessionID == "") {
@@ -6295,7 +6305,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// can't reclaim artifacts inside them mid-execution. We mark both the
 	// predicted root for a fresh Prepare and the prior root for Reuse — they
 	// usually differ (Reuse keeps the original task's directory).
-	predictedRoot := execenv.PredictRootDir(d.cfg.WorkspacesRoot, task.WorkspaceID, task.ID)
+	predictedRoot := execenv.PredictRootDir(taskRootDirParams(d.cfg.WorkspacesRoot, task))
 	d.markActiveEnvRoot(predictedRoot)
 	defer d.unmarkActiveEnvRoot(predictedRoot)
 	if task.PriorWorkDir != "" {
@@ -6562,7 +6572,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			WorkspacesRoot:        d.cfg.WorkspacesRoot,
 			Profile:               d.cfg.Profile,
 			WorkspaceID:           task.WorkspaceID,
+			WorkspaceSlug:         task.WorkspaceSlug,
 			TaskID:                task.ID,
+			IssueIdentifier:       task.IssueIdentifier,
 			AgentName:             agentName,
 			Provider:              provider,
 			CodexVersion:          codexVersion,
