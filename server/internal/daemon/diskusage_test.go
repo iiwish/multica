@@ -213,7 +213,7 @@ func TestScanDiskUsage_MixedLayoutsUseMetadataIdentity(t *testing.T) {
 	root := t.TempDir()
 	workspaceID := "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
 	legacyTaskID := "11111111-ee7a-4603-a72d-a548b2390cb2"
-	readableTaskID := "22222222-ee7a-4603-a72d-a548b2390cb2"
+	readableTaskID := "22222222-ee7a-4603-a72d-b659c34a1dc3"
 
 	legacyDir := filepath.Join(root, workspaceID, ShortID(legacyTaskID))
 	writeFile(t, filepath.Join(legacyDir, "workdir", "legacy.txt"), 10)
@@ -224,7 +224,7 @@ func TestScanDiskUsage_MixedLayoutsUseMetadataIdentity(t *testing.T) {
 		CompletedAt: time.Now().Add(-time.Hour),
 	})
 
-	readableDir := filepath.Join(root, "asset-feed-a548b2390cb2", "mul-6063-a548b2390cb2")
+	readableDir := filepath.Join(root, "asset-feed-a548b2390cb2", "mul-6063-b659c34a1dc3")
 	writeFile(t, filepath.Join(readableDir, "workdir", "readable.txt"), 20)
 	mustWriteMeta(t, readableDir, execenv.GCMeta{
 		Kind:        execenv.GCKindIssue,

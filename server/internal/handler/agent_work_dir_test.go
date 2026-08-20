@@ -24,11 +24,12 @@ import (
 func TestRelativeWorkDir(t *testing.T) {
 	const (
 		wsID   = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
-		taskID = "5c57b65b-ee7a-4603-a72d-a548b2390cb2"
+		taskID = "5c57b65b-ee7a-4603-a72d-b659c34a1dc3"
 		// The env-root segment is the TAIL of the task id, not a leading
 		// prefix: UUIDv7 puts a timestamp in front, so a leading slice is
 		// shared by every task created in the same ~65.5s window (#7326).
-		taskSeg = "a548b2390cb2"
+		wsSeg   = "a548b2390cb2"
+		taskSeg = "b659c34a1dc3"
 	)
 
 	tests := []struct {
@@ -61,10 +62,10 @@ func TestRelativeWorkDir(t *testing.T) {
 		},
 		{
 			name:     "readable envRoot path strips workspaces root",
-			workDir:  "/Users/alice/multica_workspaces/asset-feed-" + taskSeg + "/mul-6063-" + taskSeg + "/workdir",
+			workDir:  "/Users/alice/multica_workspaces/asset-feed-" + wsSeg + "/mul-6063-" + taskSeg + "/workdir",
 			wsID:     wsID,
 			taskID:   taskID,
-			expected: "asset-feed-" + taskSeg + "/mul-6063-" + taskSeg + "/workdir",
+			expected: "asset-feed-" + wsSeg + "/mul-6063-" + taskSeg + "/workdir",
 		},
 		{
 			name:     "legacy readable envRoot keeps privacy-safe display",
@@ -235,7 +236,7 @@ func TestStableIDSuffixMatchesDaemon(t *testing.T) {
 	const (
 		workspacesRoot = "/tmp/workspaces"
 		workspaceID    = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
-		taskID         = "5c57b65b-ee7a-4603-a72d-a548b2390cb2"
+		taskID         = "5c57b65b-ee7a-4603-a72d-b659c34a1dc3"
 	)
 	daemonRoot := execenv.PredictRootDir(execenv.RootDirParams{
 		WorkspacesRoot:  workspacesRoot,

@@ -45,10 +45,10 @@ func TestPredictRootDir(t *testing.T) {
 		WorkspacesRoot:  "/root",
 		WorkspaceID:     "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
 		WorkspaceSlug:   "Asset Feed",
-		TaskID:          "5c57b65b-ee7a-4603-a72d-a548b2390cb2",
+		TaskID:          "5c57b65b-ee7a-4603-a72d-b659c34a1dc3",
 		IssueIdentifier: "MUL-6063",
 	})
-	want := filepath.Join("/root", "asset-feed-a548b2390cb2", "mul-6063-a548b2390cb2")
+	want := filepath.Join("/root", "asset-feed-a548b2390cb2", "mul-6063-b659c34a1dc3")
 	if got != want {
 		t.Errorf("PredictRootDir = %q, want %q", got, want)
 	}

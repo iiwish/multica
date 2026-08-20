@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 )
 
 // The isolated checkout exists so a Codex task can commit inside its own
@@ -33,12 +35,34 @@ func TestIsolatedCheckoutIsCommittableOnWindows(t *testing.T) {
 	baseRef := getRemoteDefaultBranch(barePath)
 	baseCommit := gitRefCommit(t, barePath, baseRef)
 
+	// Exercise the production checkout under the longest readable env-root
+	// segments. This needs a real Windows runner: Git creates the task branch as
+	// a nested file below .git/refs/heads, where MAX_PATH applies to the complete
+	// path and a too-generous readable prefix fails with "Filename too long".
+	workspacesRoot, err := os.MkdirTemp("", "multica-win-workspaces-")
+	if err != nil {
+		t.Fatalf("create short workspaces root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspacesRoot) })
+	taskID := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	envRoot := execenv.PredictRootDir(execenv.RootDirParams{
+		WorkspacesRoot:  workspacesRoot,
+		WorkspaceID:     "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
+		WorkspaceSlug:   strings.Repeat("workspace", 20),
+		TaskID:          taskID,
+		IssueIdentifier: strings.Repeat("issue", 20),
+	})
+	workDir := filepath.Join(envRoot, "workdir")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("create worst-case readable workdir: %v", err)
+	}
+
 	result, err := cache.CreateWorktree(WorktreeParams{
 		WorkspaceID:         "ws-1",
 		RepoURL:             sourceRepo,
-		WorkDir:             t.TempDir(),
+		WorkDir:             workDir,
 		AgentName:           "Windows Codex",
-		TaskID:              "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		TaskID:              taskID,
 		IsolatedGitMetadata: true,
 	})
 	if err != nil {
@@ -50,6 +74,10 @@ func TestIsolatedCheckoutIsCommittableOnWindows(t *testing.T) {
 	gitDir := absoluteGitDir(t, result.Path)
 	if !isUnder(gitDir, result.Path) {
 		t.Fatalf("git dir %s is outside the task checkout %s", gitDir, result.Path)
+	}
+	taskRef := filepath.Join(gitDir, "refs", "heads", filepath.FromSlash(result.BranchName))
+	if _, err := os.Stat(taskRef); err != nil {
+		t.Fatalf("task branch ref was not created at %s: %v", taskRef, err)
 	}
 
 	// 2. Branch, stage, commit — the sequence that fails on a linked worktree.
