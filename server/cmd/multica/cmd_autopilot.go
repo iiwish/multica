@@ -291,7 +291,12 @@ func redactAutopilotWebhookCredentials(resp map[string]any) {
 		}
 
 		token := strVal(trigger, "webhook_token")
-		hasToken := token != "" || strVal(trigger, "webhook_path") != "" || strVal(trigger, "webhook_url") != ""
+		hasToken, _ := trigger["has_webhook_token"].(bool)
+		hasToken = hasToken ||
+			strVal(trigger, "kind") == "webhook" ||
+			token != "" ||
+			strVal(trigger, "webhook_path") != "" ||
+			strVal(trigger, "webhook_url") != ""
 		trigger["has_webhook_token"] = hasToken
 		if hint := webhookTokenHint(token); hint != "" {
 			trigger["webhook_token_hint"] = hint

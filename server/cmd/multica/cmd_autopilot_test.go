@@ -254,6 +254,33 @@ func TestRedactAutopilotWebhookCredentialsDoesNotDependOnTriggerKind(t *testing.
 	}
 }
 
+func TestRedactAutopilotWebhookCredentialsReportsServerRedactedToken(t *testing.T) {
+	trigger := map[string]any{
+		"id":            "trigger-1",
+		"kind":          "webhook",
+		"webhook_token": nil,
+		"webhook_path":  nil,
+		"webhook_url":   nil,
+	}
+	resp := map[string]any{"triggers": []any{trigger}}
+
+	redactAutopilotWebhookCredentials(resp)
+
+	if trigger["has_webhook_token"] != true {
+		t.Fatalf("has_webhook_token = %#v, want true for a permission-redacted webhook", trigger["has_webhook_token"])
+	}
+	if trigger["webhook_token_hint"] != nil {
+		t.Fatalf("webhook_token_hint = %#v, want null when the server withheld the token", trigger["webhook_token_hint"])
+	}
+}
+
+func TestWebhookTokenHintDoesNotExposeShortToken(t *testing.T) {
+	const shortToken = "abc"
+	if hint := webhookTokenHint(shortToken); hint != "" {
+		t.Fatalf("webhookTokenHint(%q) = %q, want empty hint", shortToken, hint)
+	}
+}
+
 func TestRunAutopilotGetRejectsShowSecretsWithTableOutput(t *testing.T) {
 	t.Setenv("MULTICA_SERVER_URL", "http://127.0.0.1")
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
