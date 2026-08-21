@@ -4789,14 +4789,17 @@ func (h *Handler) hydrateTaskUsage(ctx context.Context, issueID pgtype.UUID, res
 // issue execution log to an agent's user-facing task history. One agent-scoped
 // query covers the whole response so `multica agent tasks --output json` does
 // not pay an N+1 cost as task history grows.
-func (h *Handler) hydrateAgentTaskUsage(ctx context.Context, agentID pgtype.UUID, resp []AgentTaskResponse) {
+func (h *Handler) hydrateAgentTaskUsage(ctx context.Context, agentID pgtype.UUID, resp []AgentTaskResponse) error {
 	if len(resp) == 0 {
-		return
+		return nil
 	}
 
 	rows, err := h.Queries.ListAgentTaskUsage(ctx, agentID)
-	if err != nil || len(rows) == 0 {
-		return
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
 	}
 
 	byTask := make(map[string][]TaskUsageData, len(resp))
@@ -4806,6 +4809,7 @@ func (h *Handler) hydrateAgentTaskUsage(ctx context.Context, agentID pgtype.UUID
 			row.CacheWriteTokens, row.CostUsdTicks)
 	}
 	attachTaskUsage(resp, byTask)
+	return nil
 }
 
 func appendTaskUsage(

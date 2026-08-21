@@ -2339,7 +2339,11 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 		resp[i] = taskToResponse(t, workspaceID)
 	}
 	h.hydrateTaskAttributions(r.Context(), attributionsOf(resp))
-	h.hydrateAgentTaskUsage(r.Context(), agent.ID, resp)
+	if err := h.hydrateAgentTaskUsage(r.Context(), agent.ID, resp); err != nil {
+		slog.Warn("list agent task usage failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to list agent task usage")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }

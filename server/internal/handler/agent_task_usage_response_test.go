@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
 // TestListAgentTasksHydratesUsage pins the JSON contract used by
@@ -22,35 +26,46 @@ func TestListAgentTasksHydratesUsage(t *testing.T) {
 	otherAgentID := createHandlerTestAgent(t, "AgentTaskUsageOther", []byte("[]"))
 
 	newTask := func(agentID string) string {
-		var id string
-		if err := testPool.QueryRow(ctx, `
-			INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority)
-			VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'completed', 0)
-			RETURNING id
-		`, agentID).Scan(&id); err != nil {
-			t.Fatalf("create task: %v", err)
-		}
-		t.Cleanup(func() {
-			testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, id)
+		return dbfx.Task(t, agentID, testutil.Cols{
+			"runtime_id": handlerTestRuntimeID(t),
+			"status":     "completed",
 		})
-		return id
 	}
 
 	usageTask := newTask(agentID)
 	noUsageTask := newTask(agentID)
 	otherAgentTask := newTask(otherAgentID)
 
-	if _, err := testPool.Exec(ctx, `
-		INSERT INTO task_usage (
-			task_id, provider, model, input_tokens, output_tokens,
-			cache_read_tokens, cache_write_tokens, cost_usd_ticks
-		)
-		VALUES ($1, 'anthropic', 'claude-opus-5', 96000, 34000, 712000, 50000, NULL),
-		       ($1, 'openai', 'gpt-5.6-terra', 31000, 12000, 158000, 11000, 3310000000),
-		       ($2, 'openai', 'other-agent-model', 1, 2, 3, 4, 5)
-	`, usageTask, otherAgentTask); err != nil {
-		t.Fatalf("insert task usage: %v", err)
-	}
+	dbfx.Insert(t, "task_usage", testutil.Cols{
+		"task_id":            usageTask,
+		"provider":           "anthropic",
+		"model":              "claude-opus-5",
+		"input_tokens":       96000,
+		"output_tokens":      34000,
+		"cache_read_tokens":  712000,
+		"cache_write_tokens": 50000,
+		"cost_usd_ticks":     nil,
+	})
+	dbfx.Insert(t, "task_usage", testutil.Cols{
+		"task_id":            usageTask,
+		"provider":           "openai",
+		"model":              "gpt-5.6-terra",
+		"input_tokens":       31000,
+		"output_tokens":      12000,
+		"cache_read_tokens":  158000,
+		"cache_write_tokens": 11000,
+		"cost_usd_ticks":     int64(3310000000),
+	})
+	dbfx.Insert(t, "task_usage", testutil.Cols{
+		"task_id":            otherAgentTask,
+		"provider":           "openai",
+		"model":              "other-agent-model",
+		"input_tokens":       1,
+		"output_tokens":      2,
+		"cache_read_tokens":  3,
+		"cache_write_tokens": 4,
+		"cost_usd_ticks":     5,
+	})
 
 	usageRows, err := testHandler.Queries.ListAgentTaskUsage(ctx, parseUUID(agentID))
 	if err != nil {
@@ -138,5 +153,42 @@ func TestListAgentTasksHydratesUsage(t *testing.T) {
 		if _, present := task["usage"]; present {
 			t.Errorf("no-usage task serialises a usage key: %v", task["usage"])
 		}
+	}
+}
+
+func TestListAgentTasksReturnsErrorWhenUsageLoadFails(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+
+	agentID := createHandlerTestAgent(t, "AgentTaskUsageFailure", []byte("[]"))
+	dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id": handlerTestRuntimeID(t),
+		"status":     "completed",
+	})
+
+	lockTx, err := testPool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin controlled task usage query failure: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err := lockTx.Exec(context.Background(), `LOCK TABLE task_usage IN ACCESS EXCLUSIVE MODE`); err != nil {
+		_ = lockTx.Rollback(context.Background())
+		t.Fatalf("lock task usage for controlled query failure: %v", err)
+	}
+
+	req := newRequest(http.MethodGet, "/api/agents/"+agentID+"/tasks", nil)
+	req = withURLParam(req, "id", agentID)
+	errorCtx, cancel := context.WithTimeout(req.Context(), 250*time.Millisecond)
+	req = req.WithContext(errorCtx)
+	w := httptest.NewRecorder()
+	testHandler.ListAgentTasks(w, req)
+	cancel()
+	if err := lockTx.Rollback(context.Background()); err != nil {
+		t.Fatalf("release controlled task usage lock: %v", err)
+	}
+
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "failed to list agent task usage") {
+		t.Fatalf("usage query failure status = %d, want 500 without empty-usage fallback: %s", w.Code, w.Body.String())
 	}
 }
