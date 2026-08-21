@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -1793,10 +1794,13 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 	loc, _ := autopilotTriggerLocation(triggerTimezone)
 	triggeredAt := autopilotRunTriggeredAt(run).In(loc)
 	var envelope autopilotWebhookEnvelope
+	var eventPayload any
+	eventPayloadDecoded := false
 	if run.Source == "webhook" {
 		envelope, _ = decodeAutopilotWebhookEnvelope(run.TriggerPayload)
 	}
 	hasDeliveryVariable := false
+	deliveryValues := make(map[string]string)
 	rendered := issueTitleTemplateTokenRE.ReplaceAllStringFunc(tmpl, func(match string) string {
 		name := strings.TrimSpace(match[2 : len(match)-2])
 		switch name {
@@ -1808,12 +1812,16 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 			return triggeredAt.Format("15:04:05")
 		case "event":
 			hasDeliveryVariable = true
-			return normalizeIssueTitleTemplateValue(envelope.Event)
+			return cachedIssueTitleTemplateValue(deliveryValues, name, envelope.Event)
 		default:
 			if issueTitlePayloadVariableRE.MatchString(name) {
 				hasDeliveryVariable = true
+				if !eventPayloadDecoded {
+					eventPayload = decodeJSONValuePreservingNumbers(envelope.EventPayload)
+					eventPayloadDecoded = true
+				}
 				path := strings.Split(strings.TrimPrefix(name, "payload."), ".")
-				return normalizeIssueTitleTemplateValue(jsonScalarAtPath(envelope.EventPayload, path))
+				return cachedIssueTitleTemplateValue(deliveryValues, name, jsonScalarAtPath(eventPayload, path))
 			}
 			return match
 		}
@@ -1824,33 +1832,54 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 	return rendered
 }
 
-func jsonScalarAtPath(raw json.RawMessage, path []string) string {
-	current := raw
+func decodeJSONValuePreservingNumbers(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil
+	}
+	return value
+}
+
+func jsonScalarAtPath(root any, path []string) string {
+	current := root
 	for _, segment := range path {
-		var object map[string]json.RawMessage
-		if len(current) == 0 || json.Unmarshal(current, &object) != nil {
-			return ""
-		}
-		next, ok := object[segment]
+		object, ok := current.(map[string]any)
 		if !ok {
 			return ""
 		}
-		current = next
+		current, ok = object[segment]
+		if !ok {
+			return ""
+		}
 	}
 
-	var text string
-	if json.Unmarshal(current, &text) == nil {
-		return text
+	switch value := current.(type) {
+	case string:
+		return value
+	case json.Number:
+		return value.String()
+	case bool:
+		if value {
+			return "true"
+		}
+		return "false"
+	default:
+		return ""
 	}
-	var number json.Number
-	if json.Unmarshal(current, &number) == nil {
-		return number.String()
+}
+
+func cachedIssueTitleTemplateValue(cache map[string]string, name, value string) string {
+	if cached, ok := cache[name]; ok {
+		return cached
 	}
-	trimmed := strings.TrimSpace(string(current))
-	if trimmed == "true" || trimmed == "false" {
-		return trimmed
-	}
-	return ""
+	normalized := normalizeIssueTitleTemplateValue(value)
+	cache[name] = normalized
+	return normalized
 }
 
 func normalizeIssueTitleTemplateValue(value string) string {

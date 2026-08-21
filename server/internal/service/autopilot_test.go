@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -410,6 +412,38 @@ func TestInterpolateTemplate_EmptyDynamicTitleFallsBackToAutopilotTitle(t *testi
 	if got := s.interpolateTemplate(ap, run, "UTC"); got != ap.Title {
 		t.Fatalf("interpolateTemplate = %q, want fallback title %q", got, ap.Title)
 	}
+}
+
+func FuzzInterpolateTemplate_WebhookPayloadNeverLeaksInvalidOrControlText(f *testing.F) {
+	for _, seed := range [][]byte{
+		[]byte(`{"event":"ticket.updated","eventPayload":{"title":"ABC-123"}}`),
+		[]byte(`{"event":"demo.received","eventPayload":{"title":"hello\u0000world\u001b[31m"}}`),
+		[]byte(`{"event":"demo.received","eventPayload":{"title":9007199254740993}}`),
+		[]byte(`{"event":"demo.received","eventPayload":{"title":{"nested":true}}}`),
+		[]byte(`not-json`),
+		nil,
+	} {
+		f.Add(seed)
+	}
+
+	s := &AutopilotService{}
+	ap := db.Autopilot{
+		Title:              "Fallback title",
+		IssueTitleTemplate: pgtype.Text{String: "event={{event}} title={{payload.title}} again={{payload.title}}", Valid: true},
+	}
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		run := db.AutopilotRun{Source: "webhook", TriggerPayload: payload}
+		got := s.interpolateTemplate(ap, run, "UTC")
+		if !utf8.ValidString(got) {
+			t.Fatalf("rendered title is not valid UTF-8: %q", got)
+		}
+		if strings.IndexFunc(got, unicode.IsControl) >= 0 {
+			t.Fatalf("rendered title contains a control character: %q", got)
+		}
+		if runes := len([]rune(got)); runes > 3*issueTitleTemplateValueMaxRunes+32 {
+			t.Fatalf("rendered title unexpectedly large: %d runes", runes)
+		}
+	})
 }
 
 // TestValidateIssueTitleTemplate locks down what create/update accept.
