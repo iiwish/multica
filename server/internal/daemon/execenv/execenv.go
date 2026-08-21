@@ -331,9 +331,9 @@ type RootDirParams struct {
 // checkout and git ref paths, so every extra character is costly on Windows.
 const readablePathSegmentMax = 24
 
-// PredictRootDir returns the env root path that Prepare would create for the
-// given task, without performing any I/O. Callers use this to claim ownership
-// of the directory (e.g. against the GC loop) before Prepare/Reuse runs.
+// PredictRootDir returns the readable path proposed for a task without doing
+// I/O. ResolveRootDir freezes the first proposal and must be used by callers
+// that need the task's authoritative physical root.
 func PredictRootDir(params RootDirParams) string {
 	if params.WorkspacesRoot == "" || params.WorkspaceID == "" || params.TaskID == "" {
 		return ""
@@ -384,13 +384,16 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		return nil, fmt.Errorf("execenv: task ID is required")
 	}
 
-	envRoot := PredictRootDir(RootDirParams{
+	envRoot, err := ResolveRootDir(RootDirParams{
 		WorkspacesRoot:  params.WorkspacesRoot,
 		WorkspaceID:     params.WorkspaceID,
 		WorkspaceSlug:   params.WorkspaceSlug,
 		TaskID:          params.TaskID,
 		IssueIdentifier: params.IssueIdentifier,
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Self-heal the root-level daemon marker on every task start so a marker
 	// removed while the daemon runs is restored before the agent spawns. The
@@ -416,7 +419,7 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	// the rest of Prepare — the reset below clears the directory's CONTENTS and
 	// leaves the marker in place, so there is never a moment where the env root
 	// looks unowned to a racing task.
-	fresh, err := claimEnvRoot(envRoot, params.TaskID)
+	fresh, err := claimEnvRoot(envRoot, params.WorkspaceID, params.TaskID)
 	if err != nil {
 		return nil, fmt.Errorf("execenv: %w", err)
 	}
@@ -1177,10 +1180,10 @@ func (env *Environment) Cleanup(removeAll bool) error {
 	return nil
 }
 
-// envRootOwnerFile records which task an env root belongs to. Creating it with
-// O_EXCL is the atomic step that decides which of two same-key tasks owns the
-// directory, and it is the proof Prepare needs before wiping a directory that
-// another task may still be executing in (#7326).
+// envRootOwnerFile records which workspace and task an env root belongs to.
+// Creating it with O_EXCL is the atomic step that decides which of two same-key
+// tasks owns the directory, and it is the proof Prepare needs before wiping a
+// directory that another task may still be executing in (#7326).
 const envRootOwnerFile = ".task_owner"
 
 // claimEnvRoot atomically establishes that taskID owns envRoot.
@@ -1196,7 +1199,7 @@ const envRootOwnerFile = ".task_owner"
 // one racing caller can win each, and a caller that wins neither never reaches
 // the destructive path. The emptiness check below only decides whether a
 // caller may ATTEMPT a claim; O_EXCL alone decides who gets it.
-func claimEnvRoot(envRoot, taskID string) (fresh bool, err error) {
+func claimEnvRoot(envRoot, workspaceID, taskID string) (fresh bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(envRoot), 0o755); err != nil {
 		return false, fmt.Errorf("create workspace directory: %w", err)
 	}
@@ -1204,7 +1207,7 @@ func claimEnvRoot(envRoot, taskID string) (fresh bool, err error) {
 	switch err := os.Mkdir(envRoot, 0o755); {
 	case err == nil:
 		// We created the directory, so nothing of anyone's can be inside it.
-		if err := writeEnvRootOwnerExclusive(envRoot, taskID); err != nil {
+		if err := writeEnvRootOwnerExclusive(envRoot, workspaceID, taskID); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -1213,15 +1216,15 @@ func claimEnvRoot(envRoot, taskID string) (fresh bool, err error) {
 	}
 
 	// The directory already existed. Who owns it?
-	owner, err := readEnvRootOwner(envRoot)
+	owner, err := ReadEnvRootOwner(envRoot)
 	if err != nil {
 		return false, fmt.Errorf("read env root owner for %s: %w", envRoot, err)
 	}
 	switch {
-	case owner == taskID:
+	case owner.TaskID == taskID && (owner.WorkspaceID == "" || owner.WorkspaceID == workspaceID):
 		return false, nil
-	case owner != "":
-		return false, fmt.Errorf("env root %s belongs to task %s; refusing to reset it for task %s", envRoot, owner, taskID)
+	case owner.TaskID != "":
+		return false, fmt.Errorf("env root %s belongs to task %s in workspace %s; refusing to reset it for task %s in workspace %s", envRoot, owner.TaskID, owner.WorkspaceID, taskID, workspaceID)
 	}
 
 	// No owner. A directory holding work is never ours to take — the marker is
@@ -1235,7 +1238,7 @@ func claimEnvRoot(envRoot, taskID string) (fresh bool, err error) {
 	if !empty {
 		return false, fmt.Errorf("env root %s already holds files but names no owning task; refusing to delete it", envRoot)
 	}
-	if err := writeEnvRootOwnerExclusive(envRoot, taskID); err != nil {
+	if err := writeEnvRootOwnerExclusive(envRoot, workspaceID, taskID); err != nil {
 		// Lost the race for an empty directory: whoever won owns it now.
 		return false, err
 	}
@@ -1244,23 +1247,27 @@ func claimEnvRoot(envRoot, taskID string) (fresh bool, err error) {
 
 // writeEnvRootOwnerExclusive creates the owner marker, failing if one already
 // exists. This is the atomic arbiter between two racing claims.
-func writeEnvRootOwnerExclusive(envRoot, taskID string) error {
+func writeEnvRootOwnerExclusive(envRoot, workspaceID, taskID string) error {
 	path := filepath.Join(envRoot, envRootOwnerFile)
+	data, err := json.Marshal(EnvRootOwner{WorkspaceID: workspaceID, TaskID: taskID})
+	if err != nil {
+		return fmt.Errorf("encode env root owner for %s: %w", envRoot, err)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if errors.Is(err, os.ErrExist) {
-		owner, readErr := readEnvRootOwner(envRoot)
+		owner, readErr := ReadEnvRootOwner(envRoot)
 		if readErr != nil {
 			return fmt.Errorf("read env root owner for %s: %w", envRoot, readErr)
 		}
-		if owner == taskID {
+		if owner.TaskID == taskID && (owner.WorkspaceID == "" || owner.WorkspaceID == workspaceID) {
 			return nil
 		}
-		return fmt.Errorf("env root %s was claimed by task %s while task %s was starting", envRoot, owner, taskID)
+		return fmt.Errorf("env root %s was claimed by task %s in workspace %s while task %s in workspace %s was starting", envRoot, owner.TaskID, owner.WorkspaceID, taskID, workspaceID)
 	}
 	if err != nil {
 		return fmt.Errorf("claim env root %s: %w", envRoot, err)
 	}
-	if _, err := f.WriteString(taskID); err != nil {
+	if _, err := f.Write(data); err != nil {
 		f.Close()
 		return fmt.Errorf("record env root owner for %s: %w", envRoot, err)
 	}
@@ -1272,14 +1279,40 @@ func writeEnvRootOwnerExclusive(envRoot, taskID string) error {
 // as unowned would hand the caller a licence to delete the very directory it
 // could not identify.
 func readEnvRootOwner(envRoot string) (string, error) {
-	b, err := os.ReadFile(filepath.Join(envRoot, envRootOwnerFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
+	owner, err := ReadEnvRootOwner(envRoot)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(b)), nil
+	return owner.TaskID, nil
+}
+
+// EnvRootOwner is written before any task content so active and partially
+// prepared roots retain authoritative identity without completion metadata.
+type EnvRootOwner struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	TaskID      string `json:"task_id"`
+}
+
+// ReadEnvRootOwner reads both current JSON markers and legacy plain task IDs.
+func ReadEnvRootOwner(envRoot string) (*EnvRootOwner, error) {
+	b, err := os.ReadFile(filepath.Join(envRoot, envRootOwnerFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return &EnvRootOwner{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(trimmed, "{") {
+		return &EnvRootOwner{TaskID: trimmed}, nil
+	}
+	var owner EnvRootOwner
+	if err := json.Unmarshal(b, &owner); err != nil {
+		return nil, err
+	}
+	owner.TaskID = strings.TrimSpace(owner.TaskID)
+	owner.WorkspaceID = strings.TrimSpace(owner.WorkspaceID)
+	return &owner, nil
 }
 
 // resetEnvRootContents empties an env root the caller already owns, keeping the

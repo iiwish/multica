@@ -328,6 +328,43 @@ func TestCleanTaskDir_RemovesDirectory(t *testing.T) {
 	}
 }
 
+func TestCleanTaskDir_RemovesStableRootRecord(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	params := execenv.PrepareParams{
+		WorkspacesRoot:  root,
+		WorkspaceID:     "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
+		WorkspaceSlug:   "Asset Feed",
+		TaskID:          "5c57b65b-ee7a-4603-a72d-b659c34a1dc3",
+		IssueIdentifier: "MUL-6063",
+		AgentName:       "GC Identity",
+	}
+	env, err := execenv.Prepare(params, slog.Default())
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	original := env.RootDir
+	d := &Daemon{cfg: Config{WorkspacesRoot: root}, logger: slog.Default()}
+	if bytes := d.cleanTaskDir(original); bytes <= 0 {
+		t.Fatalf("reclaimed bytes = %d, want owner metadata bytes", bytes)
+	}
+
+	resolved, err := execenv.ResolveRootDir(execenv.RootDirParams{
+		WorkspacesRoot:  root,
+		WorkspaceID:     params.WorkspaceID,
+		WorkspaceSlug:   "Renamed Workspace",
+		TaskID:          params.TaskID,
+		IssueIdentifier: "NEW-6063",
+	})
+	if err != nil {
+		t.Fatalf("ResolveRootDir after terminal GC: %v", err)
+	}
+	if resolved == original {
+		t.Fatalf("terminal GC left stale root record %q", resolved)
+	}
+}
+
 func TestGcWorkspace_CleansEmptyWorkspaceDir(t *testing.T) {
 	t.Parallel()
 	issueID := "77777777-7777-7777-7777-777777777777"

@@ -779,11 +779,17 @@ func isAgentTaskTerminal(status string) bool {
 // that count for the cycle summary. A failed removal reports zero reclaimed.
 func (d *Daemon) cleanTaskDir(taskDir string) int64 {
 	bytes := dirSize(taskDir)
+	owner, ownerErr := execenv.ReadEnvRootOwner(taskDir)
 	if err := os.RemoveAll(taskDir); err != nil {
 		d.logger.Warn("gc: remove task dir failed", "dir", taskDir, "error", err)
 		return 0
 	} else {
 		d.logger.Info("gc: removed", "dir", taskDir, "bytes_reclaimed", bytes)
+	}
+	if ownerErr == nil && owner != nil {
+		if err := execenv.RemoveRootDirRecord(d.cfg.WorkspacesRoot, taskDir, *owner); err != nil {
+			d.logger.Warn("gc: remove stable task root record failed", "dir", taskDir, "error", err)
+		}
 	}
 	return bytes
 }
