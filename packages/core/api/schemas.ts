@@ -1259,6 +1259,17 @@ export const ChildIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
 }).loose();
 
+export const ChildIssueProgressResponseSchema = z.object({
+  progress: z.array(z.object({
+    parent_issue_id: z.string(),
+    total: z.number(),
+    done: z.number(),
+    visible_total: z.number().optional(),
+    visible_done: z.number().optional(),
+    hidden_total: z.number().optional(),
+  }).loose()).default([]),
+}).loose();
+
 export const CloudRuntimeNodeSchema = z.object({
   id: z.string(),
   owner_id: z.string(),

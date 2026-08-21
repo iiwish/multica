@@ -238,6 +238,7 @@ import {
   SendChatMessageResponseSchema,
   StartMikaOnboardingResponseSchema,
   ChildIssuesResponseSchema,
+  ChildIssueProgressResponseSchema,
   CommentsListSchema,
   CommentTriggerPreviewSchema,
   IssueTriggerPreviewSchema,
@@ -1093,8 +1094,20 @@ export class ApiClient {
     });
   }
 
-  async getChildIssueProgress(): Promise<{ progress: { parent_issue_id: string; total: number; done: number }[] }> {
-    return this.fetch("/api/issues/child-progress");
+  async getChildIssueProgress(): Promise<{
+    progress: {
+      parent_issue_id: string;
+      total: number;
+      done: number;
+      visible_total?: number;
+      visible_done?: number;
+      hidden_total?: number;
+    }[];
+  }> {
+    const raw = await this.fetch<unknown>("/api/issues/child-progress");
+    return parseWithFallback(raw, ChildIssueProgressResponseSchema, { progress: [] }, {
+      endpoint: "GET /api/issues/child-progress",
+    });
   }
 
   async deleteIssue(id: string): Promise<void> {
