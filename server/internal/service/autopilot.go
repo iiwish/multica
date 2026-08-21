@@ -1679,12 +1679,6 @@ func formatAutopilotRunTimestamp(run db.AutopilotRun, timezone string) string {
 	return triggeredAt.In(loc).Format("2006-01-02 15:04") + " " + label
 }
 
-func formatAutopilotRunDate(run db.AutopilotRun, timezone string) string {
-	triggeredAt := autopilotRunTriggeredAt(run)
-	loc, _ := autopilotTriggerLocation(timezone)
-	return triggeredAt.In(loc).Format("2006-01-02")
-}
-
 func autopilotRunTriggeredAt(run db.AutopilotRun) time.Time {
 	if run.TriggeredAt.Valid {
 		return run.TriggeredAt.Time
@@ -1723,11 +1717,7 @@ func (s *AutopilotService) buildIssueDescription(ap db.Autopilot, run db.Autopil
 	if run.Source == "webhook" && len(run.TriggerPayload) > 0 {
 		event := "webhook.received"
 		var payloadJSON []byte
-		var env struct {
-			Event        string          `json:"event"`
-			EventPayload json.RawMessage `json:"eventPayload"`
-		}
-		if err := json.Unmarshal(run.TriggerPayload, &env); err == nil {
+		if env, ok := decodeAutopilotWebhookEnvelope(run.TriggerPayload); ok {
 			if env.Event != "" {
 				event = env.Event
 			}
@@ -1764,9 +1754,27 @@ func prettifyJSON(raw []byte) ([]byte, error) {
 
 // issueTitleTemplateTokenRE matches any {{...}} token in an issue-title
 // template. We deliberately permit whitespace inside the braces ({{ date }})
-// so users can format templates either way; the canonical token is still
-// {{date}}.
+// so users can format every supported token either way.
 var issueTitleTemplateTokenRE = regexp.MustCompile(`\{\{\s*([^{}]*?)\s*\}\}`)
+
+var issueTitlePayloadVariableRE = regexp.MustCompile(`^payload\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
+
+// Bound each untrusted webhook expansion without changing existing static
+// templates or the final title contract.
+const issueTitleTemplateValueMaxRunes = 200
+
+type autopilotWebhookEnvelope struct {
+	Event        string          `json:"event"`
+	EventPayload json.RawMessage `json:"eventPayload"`
+}
+
+func decodeAutopilotWebhookEnvelope(raw []byte) (autopilotWebhookEnvelope, bool) {
+	var env autopilotWebhookEnvelope
+	if len(raw) == 0 || json.Unmarshal(raw, &env) != nil {
+		return autopilotWebhookEnvelope{}, false
+	}
+	return env, true
+}
 
 // interpolateTemplate substitutes supported {{name}} placeholders in the
 // issue title template. Whitespace inside the braces ({{ date }}) is
@@ -1778,23 +1786,75 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 	if ap.IssueTitleTemplate.Valid && ap.IssueTitleTemplate.String != "" {
 		tmpl = ap.IssueTitleTemplate.String
 	}
-	triggerDate := formatAutopilotRunDate(run, triggerTimezone)
+	loc, _ := autopilotTriggerLocation(triggerTimezone)
+	triggeredAt := autopilotRunTriggeredAt(run).In(loc)
+	var envelope autopilotWebhookEnvelope
+	if run.Source == "webhook" {
+		envelope, _ = decodeAutopilotWebhookEnvelope(run.TriggerPayload)
+	}
 	return issueTitleTemplateTokenRE.ReplaceAllStringFunc(tmpl, func(match string) string {
 		name := strings.TrimSpace(match[2 : len(match)-2])
 		switch name {
 		case "date":
-			return triggerDate
+			return triggeredAt.Format("2006-01-02")
+		case "datetime":
+			return triggeredAt.Format(time.RFC3339)
+		case "time":
+			return triggeredAt.Format("15:04:05")
+		case "event":
+			return normalizeIssueTitleTemplateValue(envelope.Event)
 		default:
+			if issueTitlePayloadVariableRE.MatchString(name) {
+				path := strings.Split(strings.TrimPrefix(name, "payload."), ".")
+				return normalizeIssueTitleTemplateValue(jsonScalarAtPath(envelope.EventPayload, path))
+			}
 			return match
 		}
 	})
 }
 
+func jsonScalarAtPath(raw json.RawMessage, path []string) string {
+	current := raw
+	for _, segment := range path {
+		var object map[string]json.RawMessage
+		if len(current) == 0 || json.Unmarshal(current, &object) != nil {
+			return ""
+		}
+		next, ok := object[segment]
+		if !ok {
+			return ""
+		}
+		current = next
+	}
+
+	var text string
+	if json.Unmarshal(current, &text) == nil {
+		return text
+	}
+	var number json.Number
+	if json.Unmarshal(current, &number) == nil {
+		return number.String()
+	}
+	trimmed := strings.TrimSpace(string(current))
+	if trimmed == "true" || trimmed == "false" {
+		return trimmed
+	}
+	return ""
+}
+
+func normalizeIssueTitleTemplateValue(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > issueTitleTemplateValueMaxRunes {
+		value = string(runes[:issueTitleTemplateValueMaxRunes])
+	}
+	return value
+}
+
 // SupportedIssueTitleTemplateVariables enumerates the placeholders that
 // interpolateTemplate will substitute. Keep this in sync with the
-// substitution logic above and with the docs in autopilots.mdx /
-// autopilots.zh.mdx.
-var SupportedIssueTitleTemplateVariables = []string{"date"}
+// substitution logic above, the CLI help, and the built-in autopilots skill.
+var SupportedIssueTitleTemplateVariables = []string{"date", "datetime", "time", "event", "payload.<field>"}
 
 // ValidateIssueTitleTemplate rejects templates that contain any {{...}} token
 // other than the supported set. An empty template is valid (the autopilot
@@ -1818,12 +1878,15 @@ func ValidateIssueTitleTemplate(tmpl string) error {
 }
 
 func isSupportedIssueTitleVariable(name string) bool {
-	for _, v := range SupportedIssueTitleTemplateVariables {
-		if name == v {
-			return true
-		}
+	if issueTitlePayloadVariableRE.MatchString(name) {
+		return true
 	}
-	return false
+	switch name {
+	case "date", "datetime", "time", "event":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *AutopilotService) getIssuePrefix(workspaceID pgtype.UUID) string {
