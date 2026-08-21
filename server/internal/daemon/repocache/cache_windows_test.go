@@ -3,6 +3,8 @@
 package repocache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,9 +44,12 @@ func TestIsolatedCheckoutIsCommittableOnWindows(t *testing.T) {
 	// Keep the base representative of the default user-level workspace root.
 	// t.TempDir embeds the full test name; nesting the production layout under
 	// it would spend that synthetic length twice and test the fixture, not the
-	// readable-path budget.
+	// readable-path budget. Keep the short base, but derive the task suffix from
+	// this test's unique source path so concurrent go test processes cannot wipe
+	// each other's checkout while resetting the fixture.
 	workspacesRoot := filepath.Join(os.TempDir(), "mw")
-	taskID := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	taskSuffixHash := sha256.Sum256([]byte(sourceRepo))
+	taskID := "a1b2c3d4-e5f6-7890-abcd-" + hex.EncodeToString(taskSuffixHash[:6])
 	envRoot := execenv.PredictRootDir(execenv.RootDirParams{
 		WorkspacesRoot:  workspacesRoot,
 		WorkspaceID:     "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
