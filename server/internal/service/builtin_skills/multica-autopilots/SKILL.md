@@ -39,7 +39,7 @@ Execution modes:
 - `{{event}}` renders the normalized webhook event name.
 - `{{payload.<field>}}` reads a scalar from the normalized webhook `eventPayload`; nested object paths such as `{{payload.repository.full_name}}` are supported.
 
-`event` and `payload` variables render empty for non-webhook runs. Missing fields and object, array, or null values also render empty. Dynamic values are whitespace-normalized to one line and limited to 200 characters. Unknown variables are rejected when the autopilot is created or updated; do not invent `{{trigger_id}}`, `{{branch}}`, or other variables.
+`event` and `payload` variables render empty for non-webhook runs. Missing fields and object, array, or null values also render empty. If those substitutions would leave the entire issue title blank, the autopilot title is used instead. Dynamic values are control-character-safe, whitespace-normalized to one line, and limited to 200 characters; truncated values carry a stable hash suffix so distinct deliveries do not collapse onto the same deduplication key. Unknown variables are rejected when the autopilot is created or updated; do not invent `{{trigger_id}}`, `{{branch}}`, or other variables.
 
 ## CLI
 

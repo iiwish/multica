@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1763,6 +1765,8 @@ var issueTitlePayloadVariableRE = regexp.MustCompile(`^payload\.[A-Za-z0-9_-]+(?
 // templates or the final title contract.
 const issueTitleTemplateValueMaxRunes = 200
 
+const issueTitleTemplateValueHashBytes = 8
+
 type autopilotWebhookEnvelope struct {
 	Event        string          `json:"event"`
 	EventPayload json.RawMessage `json:"eventPayload"`
@@ -1792,7 +1796,8 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 	if run.Source == "webhook" {
 		envelope, _ = decodeAutopilotWebhookEnvelope(run.TriggerPayload)
 	}
-	return issueTitleTemplateTokenRE.ReplaceAllStringFunc(tmpl, func(match string) string {
+	hasDeliveryVariable := false
+	rendered := issueTitleTemplateTokenRE.ReplaceAllStringFunc(tmpl, func(match string) string {
 		name := strings.TrimSpace(match[2 : len(match)-2])
 		switch name {
 		case "date":
@@ -1802,15 +1807,21 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 		case "time":
 			return triggeredAt.Format("15:04:05")
 		case "event":
+			hasDeliveryVariable = true
 			return normalizeIssueTitleTemplateValue(envelope.Event)
 		default:
 			if issueTitlePayloadVariableRE.MatchString(name) {
+				hasDeliveryVariable = true
 				path := strings.Split(strings.TrimPrefix(name, "payload."), ".")
 				return normalizeIssueTitleTemplateValue(jsonScalarAtPath(envelope.EventPayload, path))
 			}
 			return match
 		}
 	})
+	if hasDeliveryVariable && strings.TrimSpace(rendered) == "" {
+		return ap.Title
+	}
+	return rendered
 }
 
 func jsonScalarAtPath(raw json.RawMessage, path []string) string {
@@ -1843,10 +1854,18 @@ func jsonScalarAtPath(raw json.RawMessage, path []string) string {
 }
 
 func normalizeIssueTitleTemplateValue(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
 	value = strings.Join(strings.Fields(value), " ")
 	runes := []rune(value)
 	if len(runes) > issueTitleTemplateValueMaxRunes {
-		value = string(runes[:issueTitleTemplateValueMaxRunes])
+		digest := sha256.Sum256([]byte(value))
+		suffix := fmt.Sprintf("~%x", digest[:issueTitleTemplateValueHashBytes])
+		value = string(runes[:issueTitleTemplateValueMaxRunes-len(suffix)]) + suffix
 	}
 	return value
 }

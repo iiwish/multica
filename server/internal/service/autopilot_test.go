@@ -352,6 +352,66 @@ func TestInterpolateTemplate_BoundsDynamicValues(t *testing.T) {
 	}
 }
 
+func TestInterpolateTemplate_TruncatedDynamicValuesRemainDistinct(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{
+		IssueTitleTemplate: pgtype.Text{String: "{{payload.title}}", Valid: true},
+	}
+	prefix := strings.Repeat("a", issueTitleTemplateValueMaxRunes+20)
+	render := func(suffix string) string {
+		run := db.AutopilotRun{
+			Source:         "webhook",
+			TriggerPayload: []byte(`{"event":"demo.received","eventPayload":{"title":"` + prefix + suffix + `"}}`),
+		}
+		return s.interpolateTemplate(ap, run, "UTC")
+	}
+
+	first := render("-first")
+	second := render("-second")
+	if first == second {
+		t.Fatalf("distinct values collapsed to the same bounded title %q", first)
+	}
+	if got := len([]rune(first)); got != issueTitleTemplateValueMaxRunes {
+		t.Fatalf("first title length = %d, want %d", got, issueTitleTemplateValueMaxRunes)
+	}
+	if got := render("-first"); got != first {
+		t.Fatalf("bounded title is not deterministic: first=%q second=%q", first, got)
+	}
+}
+
+func TestInterpolateTemplate_ControlCharactersDoNotReachTitle(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{
+		IssueTitleTemplate: pgtype.Text{String: "{{payload.title}}", Valid: true},
+	}
+	run := db.AutopilotRun{
+		Source:         "webhook",
+		TriggerPayload: []byte(`{"event":"demo.received","eventPayload":{"title":"hello\u0000world\u001b[31m"}}`),
+	}
+
+	got := s.interpolateTemplate(ap, run, "UTC")
+	want := "hello world [31m"
+	if got != want {
+		t.Fatalf("interpolateTemplate = %q, want %q", got, want)
+	}
+}
+
+func TestInterpolateTemplate_EmptyDynamicTitleFallsBackToAutopilotTitle(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{
+		Title:              "Generic webhook issue",
+		IssueTitleTemplate: pgtype.Text{String: " {{payload.missing}} ", Valid: true},
+	}
+	run := db.AutopilotRun{
+		Source:         "webhook",
+		TriggerPayload: []byte(`{"event":"demo.received","eventPayload":{}}`),
+	}
+
+	if got := s.interpolateTemplate(ap, run, "UTC"); got != ap.Title {
+		t.Fatalf("interpolateTemplate = %q, want fallback title %q", got, ap.Title)
+	}
+}
+
 // TestValidateIssueTitleTemplate locks down what create/update accept.
 // Reject path: anything inside {{...}} that is not in the supported set.
 // Accept path: empty, plain text, fixed variables, and validated payload paths.
