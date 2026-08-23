@@ -47,6 +47,7 @@ export const FAILURE_REASON_I18N_KEYS = {
 
   // Daemon operational reasons, outside the canonical taxonomy.
   agent_fallback_message: "agent_fallback_message",
+  codex_semantic_inactivity: "codex_semantic_inactivity",
   codex_resume_oversized: "codex_resume_oversized",
   idle_watchdog: "idle_watchdog",
   local_directory_error: "local_directory_error",
@@ -54,8 +55,8 @@ export const FAILURE_REASON_I18N_KEYS = {
 
   // Pre-MUL-1949 coarse values, still present on historical rows.
   agent_error: "agent_error",
-  codex_semantic_inactivity: "codex_semantic_inactivity",
   manual: "manual",
+  user_cancelled: "user_cancelled",
 } as const;
 
 type KnownFailureReason = keyof typeof FAILURE_REASON_I18N_KEYS;

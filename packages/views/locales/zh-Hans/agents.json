@@ -894,7 +894,8 @@
       "cancelled": "系统已取消",
       "agent_error": "智能体执行出错",
       "codex_semantic_inactivity": "Codex 长时间没有语义进展",
-      "manual": "用户取消"
+      "manual": "用户取消",
+      "user_cancelled": "用户取消"
     }
   },
   "last_active": {

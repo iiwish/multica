@@ -912,7 +912,8 @@
       "cancelled": "Cancelled by the system",
       "agent_error": "Agent execution error",
       "codex_semantic_inactivity": "Codex semantic inactivity timeout",
-      "manual": "Cancelled by user"
+      "manual": "Cancelled by user",
+      "user_cancelled": "Cancelled by user"
     }
   },
   "last_active": {

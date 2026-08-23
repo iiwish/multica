@@ -795,7 +795,8 @@
       "cancelled": "시스템에서 취소함",
       "agent_error": "에이전트 실행 오류",
       "codex_semantic_inactivity": "Codex 의미 진행 없음 시간 초과",
-      "manual": "사용자가 취소함"
+      "manual": "사용자가 취소함",
+      "user_cancelled": "사용자가 취소함"
     }
   },
   "last_active": {

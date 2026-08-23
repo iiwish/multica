@@ -128,6 +128,12 @@ describe("failureReasonLabel", () => {
     );
   });
 
+  it("localizes the legacy user cancellation value retained by the service", () => {
+    expect(failureReasonLabel("user_cancelled", enT)).toBe(
+      "Cancelled by user",
+    );
+  });
+
   it("uses native copy for representative refined reasons", () => {
     expect(
       failureReasonLabel(

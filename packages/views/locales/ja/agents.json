@@ -787,7 +787,8 @@
       "cancelled": "システムによってキャンセルされました",
       "agent_error": "エージェント実行エラー",
       "codex_semantic_inactivity": "Codex に進行がないままタイムアウトしました",
-      "manual": "ユーザーがキャンセルしました"
+      "manual": "ユーザーがキャンセルしました",
+      "user_cancelled": "ユーザーがキャンセルしました"
     }
   },
   "runtime_filter": {
