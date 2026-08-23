@@ -788,8 +788,11 @@
       "agent_error_runtime_version_unsupported": "러너 CLI 버전이 지원되지 않음",
       "agent_error_runtime_missing_executable": "러너 CLI가 설치되지 않음",
       "agent_error_unknown": "에이전트 실행 오류",
+      "agent_fallback_message": "에이전트가 대체 메시지를 반환함",
       "codex_resume_oversized": "세션이 너무 커서 재개할 수 없음",
+      "idle_watchdog": "에이전트가 장시간 응답하지 않아 중지됨",
       "local_directory_error": "로컬 디렉터리 오류",
+      "cancelled": "시스템에서 취소함",
       "agent_error": "에이전트 실행 오류",
       "codex_semantic_inactivity": "Codex 의미 진행 없음 시간 초과",
       "manual": "사용자가 취소함"

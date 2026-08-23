@@ -780,8 +780,11 @@
       "agent_error_runtime_version_unsupported": "ランナー CLI のバージョンはサポートされていません",
       "agent_error_runtime_missing_executable": "ランナー CLI がインストールされていません",
       "agent_error_unknown": "エージェント実行エラー",
+      "agent_fallback_message": "エージェントがフォールバックメッセージを返しました",
       "codex_resume_oversized": "セッションが大きすぎて再開できません",
+      "idle_watchdog": "エージェントが長時間応答しなかったため停止しました",
       "local_directory_error": "ローカルディレクトリエラー",
+      "cancelled": "システムによってキャンセルされました",
       "agent_error": "エージェント実行エラー",
       "codex_semantic_inactivity": "Codex に進行がないままタイムアウトしました",
       "manual": "ユーザーがキャンセルしました"

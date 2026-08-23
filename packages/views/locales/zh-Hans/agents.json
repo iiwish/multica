@@ -887,8 +887,11 @@
       "agent_error_runtime_version_unsupported": "运行器 CLI 版本不受支持",
       "agent_error_runtime_missing_executable": "未安装运行器 CLI",
       "agent_error_unknown": "智能体执行出错",
+      "agent_fallback_message": "智能体返回了兜底消息",
       "codex_resume_oversized": "会话过大，无法恢复",
+      "idle_watchdog": "智能体长时间无活动，运行已停止",
       "local_directory_error": "本地目录出错",
+      "cancelled": "系统已取消",
       "agent_error": "智能体执行出错",
       "codex_semantic_inactivity": "Codex 长时间没有语义进展",
       "manual": "用户取消"

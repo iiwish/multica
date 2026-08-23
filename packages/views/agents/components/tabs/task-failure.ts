@@ -45,9 +45,12 @@ export const FAILURE_REASON_I18N_KEYS = {
     "agent_error_runtime_missing_executable",
   "agent_error.unknown": "agent_error_unknown",
 
-  // Provider-specific operational reasons, outside the canonical taxonomy.
+  // Daemon operational reasons, outside the canonical taxonomy.
+  agent_fallback_message: "agent_fallback_message",
   codex_resume_oversized: "codex_resume_oversized",
+  idle_watchdog: "idle_watchdog",
   local_directory_error: "local_directory_error",
+  cancelled: "cancelled",
 
   // Pre-MUL-1949 coarse values, still present on historical rows.
   agent_error: "agent_error",
@@ -67,8 +70,11 @@ export function failureReasonLabel(
   t: AgentsT,
 ): string | null {
   if (!reason) return null;
+  if (!Object.prototype.hasOwnProperty.call(FAILURE_REASON_I18N_KEYS, reason)) {
+    return reason;
+  }
   const key = FAILURE_REASON_I18N_KEYS[reason as KnownFailureReason];
-  return key ? t(($) => $.task_failure.reasons[key]) : reason;
+  return t(($) => $.task_failure.reasons[key]);
 }
 
 /**

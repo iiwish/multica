@@ -116,6 +116,18 @@ describe("failureReasonLabel", () => {
     );
   });
 
+  it("covers operational reasons emitted outside the canonical taxonomy", () => {
+    expect(failureReasonLabel("agent_fallback_message", enT)).toBe(
+      "Agent returned a fallback message",
+    );
+    expect(failureReasonLabel("idle_watchdog", enT)).toBe(
+      "Agent stopped after inactivity",
+    );
+    expect(failureReasonLabel("cancelled", enT)).toBe(
+      "Cancelled by the system",
+    );
+  });
+
   it("uses native copy for representative refined reasons", () => {
     expect(
       failureReasonLabel(
@@ -138,6 +150,13 @@ describe("failureReasonLabel", () => {
       );
     }
   });
+
+  it.each(["constructor", "toString", "__proto__"])(
+    "treats inherited Object property %s as an unknown wire value",
+    (reason) => {
+      expect(failureReasonLabel(reason, enT)).toBe(reason);
+    },
+  );
 
   it("returns null when the server supplied no reason", () => {
     expect(failureReasonLabel(null, enT)).toBeNull();
