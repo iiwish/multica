@@ -152,8 +152,9 @@ func (h *Handler) ListInbox(w http.ResponseWriter, r *http.Request) {
 // unbounded archive never rides along with the main list.
 //
 // The query drops any issue that also has an active row, keeping this list and
-// the main inbox mutually exclusive per issue group, and caps the response at
-// 200 rows — see the query comment for both.
+// the main inbox mutually exclusive per issue group. It selects at most 200
+// groups and returns only each group's newest row plus its optional comment
+// anchor — see the query comment for both the bound and the grouping contract.
 func (h *Handler) ListArchivedInbox(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {

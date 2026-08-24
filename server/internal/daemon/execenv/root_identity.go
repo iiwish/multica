@@ -229,11 +229,11 @@ func findOwnedTaskRoot(params RootDirParams) (string, error) {
 				return "", fmt.Errorf("execenv: read candidate env root owner for %s: %w", candidate, readErr)
 			}
 			if owner.TaskID == "" {
-				empty, emptyErr := dirIsEmpty(candidate)
-				if emptyErr != nil {
-					return "", fmt.Errorf("execenv: inspect candidate env root %s: %w", candidate, emptyErr)
+				hasWork, inspectErr := envRootHoldsWork(candidate)
+				if inspectErr != nil {
+					return "", fmt.Errorf("execenv: inspect candidate env root %s: %w", candidate, inspectErr)
 				}
-				if !empty {
+				if hasWork {
 					return "", fmt.Errorf("execenv: candidate env root %s holds files but has no owner", candidate)
 				}
 			} else if owner.TaskID != params.TaskID {

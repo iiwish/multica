@@ -1670,6 +1670,33 @@ describe("Plugin schemas", () => {
     expect(parsed.installed_version).toBe("1.0.0");
     expect(parsed.added_scopes).toEqual(["comments:write"]);
   });
+
+  it("preserves automatic schedules on both consent and installed Plugin payloads", () => {
+    const schedule = { cron: "*/5 * * * *", timezone: "Asia/Shanghai" };
+    const preview = PluginPreviewSchema.parse({
+      manifest: {
+        key: "com.example.digest",
+        name: "Digest",
+        version: "1.0.0",
+        author: { name: "example" },
+        contributes: {
+          hooks: [{ key: "digest", name: "Digest", triggers: ["schedule"], schedule }],
+        },
+      },
+    });
+    expect(preview.manifest.contributes?.hooks?.[0]?.schedule).toEqual(schedule);
+
+    const installation = PluginInstallationSchema.parse({
+      id: "installation-1",
+      hooks: [{
+        key: "digest",
+        name: "Digest",
+        triggers: ["schedule"],
+        schedule: { ...schedule, next_run_at: "2026-08-23T10:15:00Z" },
+      }],
+    });
+    expect(installation.hooks[0]?.schedule?.next_run_at).toBe("2026-08-23T10:15:00Z");
+  });
 });
 
 // Issue status catalog (MUL-6243). The catalog drives how every status renders,
