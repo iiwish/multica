@@ -264,6 +264,13 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
 			return discoverDimModels(ctx, runtimeCmd)
 		})
+	case "zeroclaw":
+		// ZeroClaw's ACP server advertises no catalog: session/new answers
+		// exactly {sessionId, workspaceDir} (verified against 0.8.4), and it
+		// has no session-scoped model selection to consume one anyway — see
+		// ModelSelectionSupported. Return an empty list rather than spawning
+		// an ACP subprocess that can only ever come back empty.
+		return Catalog{Models: []Model{}}, nil
 	default:
 		return Catalog{}, fmt.Errorf("unknown agent type: %q", providerType)
 	}
@@ -367,7 +374,7 @@ func QualifyModelID(catalog Catalog, model string) (string, bool) {
 // dropdown plus a silently-ignored manual-entry field.
 func ModelSelectionSupported(providerType string) bool {
 	switch providerType {
-	case "qwenpaw", "mcode":
+	case "qwenpaw", "mcode", "zeroclaw":
 		// QwenPaw's `session/set_model` persists to agent.json at the agent
 		// scope, not the session scope. Calling it would mutate the user's
 		// shared, persistent agent config. Model override is therefore
@@ -375,7 +382,11 @@ func ModelSelectionSupported(providerType string) bool {
 		// the agent profile. If QwenPaw makes model selection session-scoped
 		// upstream, this can be reverted to `true`. MCode similarly exposes no
 		// model option through ACP, so its runtime configuration remains the
-		// source of truth.
+		// source of truth. ZeroClaw goes further: `session/set_model` is not in
+		// its ACP dispatch table at all (0.8.4 answers -32601) and no handler
+		// reads a model param, so the model comes from the ZeroClaw agent
+		// profile (`agents.<alias>.model_provider`) and nothing Multica sends
+		// can change it.
 		return false
 	default:
 		return true
@@ -2327,6 +2338,7 @@ func discoverGrokModels(ctx context.Context, runtimeCmd Command) (Catalog, error
 		clientName:   "multica-model-discovery",
 		tmpdirPrefix: "multica-grok-discovery-",
 		acpArgs:      []string{"--no-auto-update", "agent", "--always-approve", "stdio"},
+		annotate:     annotateGrokThinkingFromACP,
 		selectAuthMethod: func(initResult json.RawMessage, childEnv []string) (string, error) {
 			return selectGrokAuthMethod(extractACPAuthMethods(initResult), envHasNonEmpty(childEnv, "XAI_API_KEY"))
 		},
@@ -2343,7 +2355,6 @@ func discoverGrokModels(ctx context.Context, runtimeCmd Command) (Catalog, error
 			models[i].Provider = "xai"
 		}
 	}
-	annotateGrokThinking(models)
 	return Catalog{Models: models}, nil
 }
 
@@ -2362,13 +2373,14 @@ func grokStaticModels() []Model {
 
 // annotateGrokThinking attaches only capabilities confirmed by xAI's
 // per-model reasoning documentation and Grok Build's `--effort` flag.
-// session/new does not advertise effort catalogs on the versions this
-// table covers, so unknown and composer models deliberately keep Thinking
-// nil instead of exposing values that may fail at runtime.
+// Unknown and composer models deliberately keep Thinking nil instead of
+// exposing values that may fail at runtime. Successful discovery replaces
+// these fallback catalogs with the installed CLI's advertised values.
 //
 // grok-4.6 documents and accepts `xhigh` (docs.x.ai/developers/grok-4-6,
-// grok 1.0.5 `--effort`). grok-4.5 does not; the server enum lets the
-// token through and ValidateThinkingLevel still fails it closed for 4.5.
+// grok 1.0.5 `--effort`). grok-4.5 does not; the server's dynamic literal
+// gate lets the token through and ValidateThinkingLevel still fails it closed
+// for 4.5 using the per-model catalog.
 func annotateGrokThinking(models []Model) {
 	for i := range models {
 		switch models[i].ID {
@@ -2390,6 +2402,65 @@ func grokThinkingCatalog(includeXHigh bool) *ModelThinking {
 		levels = append(levels, ThinkingLevel{Value: "xhigh", Label: "Extra high"})
 	}
 	return &ModelThinking{SupportedLevels: levels}
+}
+
+// annotateGrokThinkingFromACP fills in each model's effort catalog from the
+// xAI vendor `_meta` block on its `session/new` entry:
+//
+//	{"modelId": "grok-4.6", "_meta": {"supportsReasoningEffort": true,
+//	  "reasoningEfforts": [{"value": "high", "label": "High Effort", "default": true}, ...]}}
+//
+// This extension is outside the core ACP schema, so the parse stays narrow:
+// models whose entry does not advertise it keep Thinking nil, which hides the
+// picker instead of offering levels the CLI may reject.
+func annotateGrokThinkingFromACP(models []Model, sessionResult json.RawMessage) {
+	var resp struct {
+		Models struct {
+			AvailableModels []struct {
+				ModelID string `json:"modelId"`
+				Meta    struct {
+					SupportsReasoningEffort bool `json:"supportsReasoningEffort"`
+					ReasoningEfforts        []struct {
+						Value   string `json:"value"`
+						Label   string `json:"label"`
+						Default bool   `json:"default"`
+					} `json:"reasoningEfforts"`
+				} `json:"_meta"`
+			} `json:"availableModels"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(sessionResult, &resp); err != nil {
+		return
+	}
+	thinkingByModel := map[string]*ModelThinking{}
+	for _, entry := range resp.Models.AvailableModels {
+		if !entry.Meta.SupportsReasoningEffort {
+			continue
+		}
+		thinking := &ModelThinking{}
+		seen := map[string]bool{}
+		for _, effort := range entry.Meta.ReasoningEfforts {
+			value := strings.TrimSpace(effort.Value)
+			if value == "" || seen[value] || !isValidDynamicThinkingValue(value) {
+				continue
+			}
+			seen[value] = true
+			label := strings.TrimSpace(effort.Label)
+			if label == "" {
+				label = value
+			}
+			thinking.SupportedLevels = append(thinking.SupportedLevels, ThinkingLevel{Value: value, Label: label})
+			if effort.Default {
+				thinking.DefaultLevel = value
+			}
+		}
+		if len(thinking.SupportedLevels) > 0 {
+			thinkingByModel[strings.TrimSpace(entry.ModelID)] = thinking
+		}
+	}
+	for i := range models {
+		models[i].Thinking = thinkingByModel[models[i].ID]
+	}
 }
 
 // discoverCursorModels runs `cursor-agent --list-models` and parses
