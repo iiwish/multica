@@ -1380,6 +1380,11 @@ func LockEnvRootForReuse(wsRoot *os.Root, rel, envRoot string) (*EnvRootClaim, o
 // is still running.
 const envRootOwnerFile = ".task_owner"
 
+const (
+	envRootOwnerTempPrefix = ".task_owner-"
+	envRootOwnerTempSuffix = ".tmp"
+)
+
 // envRootLockFile carries the env root's exclusive execution lock: whether the
 // owner is STILL RUNNING. The two answer different questions and both are
 // needed — a dead task's directory still holds its work, and a live task's
@@ -1434,6 +1439,9 @@ func claimEnvRoot(envRoot, workspaceID, taskID string) (lockFile *os.File, reset
 			lockFile = nil
 		}
 	}()
+	if err := removeStaleEnvRootOwnerTemps(envRoot); err != nil {
+		return nil, false, fmt.Errorf("remove stale env root owner temp files for %s: %w", envRoot, err)
+	}
 
 	owner, err := ReadEnvRootOwner(envRoot)
 	if err != nil {
@@ -1496,15 +1504,59 @@ func releaseLockFile(f *os.File) {
 
 // writeEnvRootOwner records authoritative workspace/task identity. Callers
 // must hold the env root lock, which makes overwriting a torn or legacy marker
-// safe from another execution racing mid-claim.
+// safe from another execution racing mid-claim. The same-directory temp file
+// and rename keep lock-free readers from observing a truncated JSON marker.
 func writeEnvRootOwner(envRoot, workspaceID, taskID string) error {
 	path := filepath.Join(envRoot, envRootOwnerFile)
 	data, err := json.Marshal(EnvRootOwner{WorkspaceID: workspaceID, TaskID: taskID})
 	if err != nil {
 		return fmt.Errorf("encode env root owner for %s: %w", envRoot, err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("record env root owner for %s: %w", envRoot, err)
+
+	tmp, err := os.CreateTemp(envRoot, envRootOwnerTempPrefix+"*"+envRootOwnerTempSuffix)
+	if err != nil {
+		return fmt.Errorf("create temp env root owner for %s: %w", envRoot, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp env root owner for %s: %w", envRoot, err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp env root owner for %s: %w", envRoot, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp env root owner for %s: %w", envRoot, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp env root owner for %s: %w", envRoot, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace env root owner for %s: %w", envRoot, err)
+	}
+	return nil
+}
+
+// removeStaleEnvRootOwnerTemps clears unpublished files left by a process that
+// exited before the atomic rename. Callers hold the env root lock, so no live
+// owner write can be using one of these files.
+func removeStaleEnvRootOwnerTemps(envRoot string) error {
+	entries, err := os.ReadDir(envRoot)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, envRootOwnerTempPrefix) || !strings.HasSuffix(name, envRootOwnerTempSuffix) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(envRoot, name)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

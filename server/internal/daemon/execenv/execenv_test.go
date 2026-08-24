@@ -6839,6 +6839,80 @@ func TestClaimEnvRootRepairsTornOwnerMarker(t *testing.T) {
 	}
 }
 
+// TestWriteEnvRootOwnerAtomicallyReplacesMarker pins the write protocol used
+// when a legacy task-only marker is upgraded. Rewriting the file in place can
+// expose empty or partial JSON to disk-usage readers and permanently wedge the
+// root after a crash. Renaming a complete same-directory temp file changes the
+// file identity while leaving only a fully parseable marker at the public path.
+func TestWriteEnvRootOwnerAtomicallyReplacesMarker(t *testing.T) {
+	t.Parallel()
+	envRoot := t.TempDir()
+	ownerPath := filepath.Join(envRoot, envRootOwnerFile)
+	const taskID = "aaaaaaaa-1111-2222-3333-0123456789ab"
+	if err := os.WriteFile(ownerPath, []byte(taskID), 0o644); err != nil {
+		t.Fatalf("seed legacy owner: %v", err)
+	}
+	before, err := os.Stat(ownerPath)
+	if err != nil {
+		t.Fatalf("stat legacy owner: %v", err)
+	}
+
+	if err := writeEnvRootOwner(envRoot, "ws-authoritative", taskID); err != nil {
+		t.Fatalf("upgrade owner: %v", err)
+	}
+	after, err := os.Stat(ownerPath)
+	if err != nil {
+		t.Fatalf("stat upgraded owner: %v", err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("owner marker was rewritten in place instead of atomically replaced")
+	}
+
+	owner, err := ReadEnvRootOwner(envRoot)
+	if err != nil {
+		t.Fatalf("read upgraded owner: %v", err)
+	}
+	if owner.WorkspaceID != "ws-authoritative" || owner.TaskID != taskID {
+		t.Fatalf("owner = %#v, want authoritative workspace and task identity", owner)
+	}
+	entries, err := os.ReadDir(envRoot)
+	if err != nil {
+		t.Fatalf("read env root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != envRootOwnerFile {
+		t.Fatalf("env root entries = %v, want only %s", entries, envRootOwnerFile)
+	}
+}
+
+func TestClaimEnvRootRecoversOwnerTempLeftBeforeRename(t *testing.T) {
+	t.Parallel()
+	envRoot := t.TempDir()
+	staleTemp := filepath.Join(envRoot, envRootOwnerTempPrefix+"crashed"+envRootOwnerTempSuffix)
+	if err := os.WriteFile(staleTemp, []byte(`{"workspace_id":"ws"`), 0o600); err != nil {
+		t.Fatalf("seed unpublished owner temp: %v", err)
+	}
+
+	const taskID = "aaaaaaaa-1111-2222-3333-0123456789ab"
+	lock, reset, err := claimEnvRoot(envRoot, "ws", taskID)
+	if err != nil {
+		t.Fatalf("claim after interrupted owner write: %v", err)
+	}
+	defer releaseLockFile(lock)
+	if reset {
+		t.Fatal("recovering an unpublished owner write should not reset the env root")
+	}
+	if _, err := os.Stat(staleTemp); !os.IsNotExist(err) {
+		t.Fatalf("stale owner temp still exists: %v", err)
+	}
+	owner, err := ReadEnvRootOwner(envRoot)
+	if err != nil {
+		t.Fatalf("read recovered owner: %v", err)
+	}
+	if owner.WorkspaceID != "ws" || owner.TaskID != taskID {
+		t.Fatalf("owner = %#v, want recovered workspace and task identity", owner)
+	}
+}
+
 // TestReleaseLockFreesEnvRootForALaterDispatch pins the lifetime rule that
 // Windows CI surfaced: the lock belongs to the task EXECUTION, and nothing in
 // production calls Environment.Cleanup — the GC reclaims env roots on its own
