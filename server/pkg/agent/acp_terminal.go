@@ -10,10 +10,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf8"
 )
 
-const defaultACPOutputByteLimit = 50_000
+const (
+	defaultACPOutputByteLimit             = 50_000
+	acpTerminalProcessGroupCleanupTimeout = 2 * time.Second
+)
 
 // acpTerminal is the daemon-side implementation of ACP's terminal/* methods.
 // ACP agents use these calls for shell tools when the client advertises the
@@ -92,12 +96,6 @@ func (t *acpTerminal) wait() {
 }
 
 func (t *acpTerminal) kill() error {
-	select {
-	case <-t.done:
-		return nil
-	default:
-	}
-
 	t.mu.Lock()
 	cmd := t.cmd
 	t.mu.Unlock()
@@ -105,6 +103,13 @@ func (t *acpTerminal) kill() error {
 		return nil
 	}
 	signalProcessGroup(cmd, syscall.SIGKILL)
+	// Cmd.Wait only describes the direct process. On Unix, descendants can
+	// remain in its process group after that process exits, especially when a
+	// background child redirects inherited output. Confirm the entire group is
+	// gone before terminal/kill or terminal/release reports success.
+	if runtime.GOOS != "windows" && !waitProcessGroupGone(cmd, acpTerminalProcessGroupCleanupTimeout) {
+		return fmt.Errorf("process group %d still active after %s", cmd.Process.Pid, acpTerminalProcessGroupCleanupTimeout)
+	}
 	return nil
 }
 
@@ -230,18 +235,20 @@ func (c *hermesClient) acpTerminalFor(id string) (*acpTerminal, bool) {
 func (c *hermesClient) acpTerminalRelease(id string) error {
 	c.terminalMu.Lock()
 	t, ok := c.terminals[id]
-	if ok {
-		delete(c.terminals, id)
-	}
 	c.terminalMu.Unlock()
 	if !ok {
 		return nil
 	}
-	select {
-	case <-t.done:
-	default:
-		_ = t.kill()
+	if err := t.kill(); err != nil {
+		return fmt.Errorf("release terminal %q: %w", id, err)
 	}
+
+	// Delete only after cleanup is confirmed so a failed release can be retried.
+	c.terminalMu.Lock()
+	if c.terminals[id] == t {
+		delete(c.terminals, id)
+	}
+	c.terminalMu.Unlock()
 	return nil
 }
 
