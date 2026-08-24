@@ -99,7 +99,12 @@ func TestACPManagedTerminalReleaseTerminatesProcessTreeAfterParentExit(t *testin
 	}
 	processGroupID := terminal.cmd.Process.Pid
 	childPID := waitForACPChildPID(t, pidFile, 2*time.Second)
-	defer syscall.Kill(childPID, syscall.SIGKILL)
+	childNeedsCleanup := true
+	defer func() {
+		if childNeedsCleanup {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+	}()
 
 	request := json.RawMessage(`{"sessionId":"s","terminalId":"` + id + `"}`)
 	status, err := c.acpTerminalResponse("terminal/wait_for_exit", request)
@@ -116,7 +121,10 @@ func TestACPManagedTerminalReleaseTerminatesProcessTreeAfterParentExit(t *testin
 	if _, err := c.acpTerminalResponse("terminal/release", request); err != nil {
 		t.Fatal(err)
 	}
-	waitForACPProcessExit(t, childPID, 2*time.Second)
+	if processExists(childPID) {
+		t.Fatalf("terminal child process %d still exists after terminal/release returned", childPID)
+	}
+	childNeedsCleanup = false
 	if err := syscall.Kill(-processGroupID, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("process group %d still exists after terminal/release: %v", processGroupID, err)
 	}
@@ -144,15 +152,4 @@ func waitForACPChildPID(t *testing.T, path string, timeout time.Duration) int {
 
 func processExists(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
-}
-
-func waitForACPProcessExit(t *testing.T, pid int, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for processExists(pid) && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if processExists(pid) {
-		t.Fatalf("terminal child process %d survived terminal/release", pid)
-	}
 }
