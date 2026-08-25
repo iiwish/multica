@@ -57,6 +57,13 @@ Your responsibilities, in order:
    ` + "`" + `failed` + "`" + ` (you hit an error).
    This is mandatory on every turn — it records your decision in the
    issue timeline so humans can see you evaluated the trigger.
+   Record it against the issue THIS turn is running on (the issue id in
+   your task context). It does not need to be assigned to your squad.
+   If the call fails, make sure the turn still leaves a record, without
+   breaking the one-comment-per-turn rule: post a short comment with the
+   outcome and the error ONLY if you have not already commented this turn
+   (the no_action case). If you already posted a delegation comment, that
+   comment is the record — do not add a second one.
 4. **Stop after dispatching.** Once your delegation comment is posted
    and evaluation recorded, end your turn. Do not continue working,
    do not write code, do not open files. You will be re-triggered
@@ -74,15 +81,19 @@ Your responsibilities, in order:
 // leader was woken on is assigned to THIS squad. Only then does the leader own
 // the parent's status arc.
 //
-// This grant is what the reply-mode leader bullet routes on, by section name:
-// present → the leader owns the parent's arc, absent → no status writes at
-// all (MUL-6300). The ordinary assignee-scoped arc never applies to a leader,
-// because the parent is assigned to the squad, not to the leader agent — so
-// without this section a leader could never wrap the parent up, and the
-// @mention-dispatch shape (no child issues, so no child-done system comment)
-// would leave it stuck in in_progress forever. The "even when no comment
-// asked you to" clause makes the standing nature explicit — keep the heading
-// text in sync with writeWorkflowIssue.
+// Since MUL-6417 the runtime brief has no grant routing that consumes this
+// section by name: the unified workflow writes status as the work changes it
+// (in_progress when a turn starts advancing the issue's ask, the reached
+// state at turn end), and the leader's only brief-side special case is that a
+// dispatch turn leaves the parent in_progress. This section's
+// job is the owning/guest permission boundary, drawn at the Agent Identity
+// layer (Instruction Precedence puts it above the workflow). The owning
+// leader needs the standing wrap-up instruction below — the @mention-dispatch
+// shape (no child issues, so no child-done system comment) never produces a
+// comment that asks for in_review, so without it the parent would sit in
+// in_progress forever; the guest leader gets the prohibition instead
+// (squadParentStatusNotOwned). Both compositions are pinned by
+// handler/squad_parent_status_contract_test.go.
 const squadParentStatusOwned = `6. **Own the parent issue status.** This issue is assigned to your squad,
    so its status is yours to manage (unless Agent Identity forbids status
    changes). On the first assignment turn, move the parent to
@@ -126,7 +137,10 @@ const squadOperatingProtocolHardRules = `Hard rules:
   explaining the gap (and @mention the issue's reporter if possible)
   rather than silently doing the work.
 - ALWAYS call ` + "`" + `multica squad activity` + "`" + ` before ending your turn —
-  even when the outcome is no_action.
+  even when the outcome is no_action. If it errors on a turn where you
+  posted no comment, leave one short comment instead; never let an
+  evaluation end with no record at all, and never post a second comment
+  just to report the error.
 - A child issue you create with ` + "`" + `--status todo` + "`" + ` and an agent assignee
   already fires that agent automatically — the assignment IS the trigger.
   If you also @mention the same agent on this parent issue for the same

@@ -23,6 +23,17 @@ describe("ProviderLogo", () => {
     expect(logo?.classList.contains("runtime-logo")).toBe(true);
   });
 
+  it("renders the dedicated Dim mark", () => {
+    const { container } = render(<ProviderLogo provider="dim" className="runtime-logo" />);
+
+    const logo = container.querySelector("img");
+    const logoSrc = decodeURIComponent(logo?.getAttribute("src") ?? "");
+
+    expect(logo?.getAttribute("alt")).toBe("");
+    expect(logoSrc).toContain("dim-logo.png");
+    expect(logo?.classList.contains("runtime-logo")).toBe(true);
+  });
+
   it("renders the dedicated Qwen Code mark", () => {
     const { container } = render(<ProviderLogo provider="qwen" className="runtime-logo" />);
 
@@ -79,6 +90,22 @@ describe("ProviderLogo", () => {
     expect(logo?.getAttribute("fill")).toBe("currentColor");
     expect(path?.getAttribute("d")).toContain("M27.0157 5.80436");
     expect(path?.getAttribute("d")).toContain("ZM11.0587 8.88053");
+    expect(logo?.classList.contains("runtime-logo")).toBe(true);
+  });
+
+  it("renders the ZeroClaw placeholder mark instead of the generic fallback", () => {
+    const { container } = render(
+      <ProviderLogo provider="zeroclaw" className="runtime-logo" />,
+    );
+
+    const logo = container.querySelector("svg");
+
+    // No official ZeroClaw asset has been sourced yet, so this pins the
+    // deliberate placeholder mark (three strokes) rather than the generic
+    // <Monitor /> fallback that unknown providers get.
+    expect(logo?.getAttribute("viewBox")).toBe("0 0 24 24");
+    expect(logo?.getAttribute("stroke")).toBe("currentColor");
+    expect(logo?.querySelectorAll("path").length).toBe(3);
     expect(logo?.classList.contains("runtime-logo")).toBe(true);
   });
 });

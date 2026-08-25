@@ -20,6 +20,10 @@ const (
 	// unblocked, which let exactly such a daemon through (MUL-5707). A daemon
 	// that implements the mode says so; one that does not, cannot.
 	DaemonCapabilityLocalWorktreeV1 = "local-worktree-v1"
+	// DaemonCapabilitySourceContextQuickCreateV1 advertises support for the
+	// two-section quick-create prompt that keeps a new instruction separate
+	// from immutable historical source context.
+	DaemonCapabilitySourceContextQuickCreateV1 = "source_context_quick_create_v1"
 
 	// DaemonCapabilityRPCV1 advertises that the daemon can carry
 	// request/response RPCs over the WebSocket control connection (MUL-4257).
@@ -171,13 +175,6 @@ type TaskMessagePayload struct {
 	Input     map[string]any `json:"input,omitempty"`   // tool input (tool_use only)
 	Output    string         `json:"output,omitempty"`  // tool output (tool_result only)
 	CreatedAt string         `json:"created_at,omitempty"`
-
-	// Truncated marks a payload whose Input/Output were clipped for the
-	// realtime fanout (MUL-6396). The REST list endpoints never set it — they
-	// always return the full persisted row — so a client that sees it knows
-	// the authoritative content is one GET away. Clients render the clipped
-	// text immediately and backfill the full row in the background.
-	Truncated bool `json:"truncated,omitempty"`
 }
 
 // DaemonRegisterPayload is sent from daemon to server on connection.

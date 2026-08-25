@@ -258,10 +258,25 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	if e, ok := probe("MULTICA_QWENPAW_PATH", "qwenpaw", ""); ok {
 		agents["qwenpaw"] = e
 	}
+	// Dim (`dim`) is the DimCode CLI agent, driven over ACP via `dim acp`.
+	// MULTICA_DIM_MODEL seeds the daemon-wide default (a model id from the
+	// user's logged-in dim catalog).
+	if e, ok := probe("MULTICA_DIM_PATH", "dim", "MULTICA_DIM_MODEL"); ok {
+		agents["dim"] = e
+	}
 	// MiniMax Code (`mcode`) exposes an ACP v1 server through `mcode acp`.
 	// Model selection is owned by the MCode runtime, so there is no model env.
 	if e, ok := probe("MULTICA_MCODE_PATH", "mcode", ""); ok {
 		agents["mcode"] = e
+	}
+	// ZeroClaw (`zeroclaw`) is a Rust-based generic agent CLI, driven over
+	// ACP via `zeroclaw acp`. It takes no model env var: its ACP server has no
+	// `session/set_model` and no handler reads a model param, so the model
+	// comes from ZeroClaw's own agent profile and ExecOptions.Model can never
+	// be applied — see ModelSelectionSupported. Reading one here would only
+	// advertise a knob that silently does nothing.
+	if e, ok := probe("MULTICA_ZEROCLAW_PATH", "zeroclaw", ""); ok {
+		agents["zeroclaw"] = e
 	}
 	return agents
 }

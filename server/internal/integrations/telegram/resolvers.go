@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/channel"
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
 // This file is the Telegram ResolverSet: the platform-specific seams the
@@ -191,7 +192,17 @@ func (r *deduper) Release(ctx context.Context, installationID pgtype.UUID, messa
 
 // ---- session bind / append ----
 
-type sessionBinder struct{ session *engine.ChatSession }
+// chatSession is the shared engine session surface used by the Telegram
+// adapter. Keeping the adapter behind this narrow seam makes its parameter
+// mapping testable without a database.
+type chatSession interface {
+	EnsureSession(ctx context.Context, in engine.EnsureSessionInput) (pgtype.UUID, error)
+	MarkPendingFresh(ctx context.Context, sessionID pgtype.UUID, messageID string) error
+	AppendUserMessage(ctx context.Context, in engine.AppendInput) (engine.AppendResult, error)
+	BindMediaRefs(ctx context.Context, in engine.BindMediaInput) error
+}
+
+type sessionBinder struct{ session chatSession }
 
 func (r *sessionBinder) EnsureSession(ctx context.Context, p engine.EnsureSessionParams) (pgtype.UUID, error) {
 	bindingKey, config, _ := telegramSessionRouting(p.Message)
@@ -206,8 +217,8 @@ func (r *sessionBinder) EnsureSession(ctx context.Context, p engine.EnsureSessio
 	})
 }
 
-func (r *sessionBinder) MarkPendingFresh(ctx context.Context, sessionID pgtype.UUID) error {
-	return r.session.MarkPendingFresh(ctx, sessionID)
+func (r *sessionBinder) MarkPendingFresh(ctx context.Context, sessionID pgtype.UUID, messageID string) error {
+	return r.session.MarkPendingFresh(ctx, sessionID, messageID)
 }
 
 func (r *sessionBinder) AppendMessage(ctx context.Context, p engine.AppendParams) (engine.AppendResult, error) {
@@ -226,6 +237,7 @@ func (r *sessionBinder) AppendMessage(ctx context.Context, p engine.AppendParams
 		ThreadID:            replyThread,
 		ClaimToken:          p.ClaimToken,
 		MediaPendingSeconds: p.MediaPendingSeconds,
+		ForceFresh:          p.Message.ForceFresh,
 	})
 }
 
@@ -246,6 +258,7 @@ type auditor struct{ q *db.Queries }
 func (r *auditor) RecordDrop(ctx context.Context, instID pgtype.UUID, msg channel.InboundMessage, reason engine.DropReason) error {
 	raw, _ := decodeTelegramRaw(msg) // best-effort; a decode miss still audits
 	return r.q.RecordChannelInboundDrop(ctx, db.RecordChannelInboundDropParams{
+		ID:               dbid.NewV7(),
 		ChannelType:      string(TypeTelegram),
 		EventType:        raw.EventType,
 		DropReason:       string(reason),

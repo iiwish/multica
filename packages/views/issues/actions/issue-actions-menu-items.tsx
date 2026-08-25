@@ -108,7 +108,7 @@ export function IssueActionsMenuItems({
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
   const statusOptions = useStatusOptions(wsId);
-  const { categoryOf, entryOf } = useIssueStatuses(wsId);
+  const { categoryOf, colorOf } = useIssueStatuses(wsId);
   const {
     isPinned,
     updateField,
@@ -177,7 +177,7 @@ export function IssueActionsMenuItems({
           <StatusIcon
             status={issue.status}
             category={categoryOf(issue.status)}
-            color={entryOf(issue.status)?.color}
+            color={colorOf(issue.status)}
             className="h-3.5 w-3.5"
           />
           {t(($) => $.actions.status)}
