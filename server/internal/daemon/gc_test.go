@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,76 @@ func createTaskDir(t *testing.T, root, wsID, dirName string, meta *execenv.GCMet
 	return taskDir
 }
 
+// TestRunGC_ReclaimsStrandedTaskRootRecords guards the wiring: cleanTaskDir
+// only removes a stable-root record when it reclaims the root that record
+// points at, so a record whose root never materialised has no other remover,
+// and nothing else walks .task_roots. A live record must survive the same
+// sweep — its absence from disk is the normal pre-Prepare state.
+func TestRunGC_ReclaimsStrandedTaskRootRecords(t *testing.T) {
+	d := newGCTestDaemon(t, http.NewServeMux())
+	root := d.cfg.WorkspacesRoot
+	const workspaceID = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
+
+	liveParams := execenv.RootDirParams{
+		WorkspacesRoot: root, WorkspaceID: workspaceID,
+		WorkspaceSlug: "Asset Feed", TaskID: "5c57b65b-ee7a-4603-a72d-b659c34a1dc3",
+		IssueIdentifier: "MUL-6063",
+	}
+	strandedParams := execenv.RootDirParams{
+		WorkspacesRoot: root, WorkspaceID: workspaceID,
+		WorkspaceSlug: "Asset Feed", TaskID: "5c57b65b-ee7a-4603-a72d-c760d45b2ed4",
+		IssueIdentifier: "MUL-6063",
+	}
+
+	livePath, err := execenv.ResolveRootDir(liveParams)
+	if err != nil {
+		t.Fatalf("resolve live root: %v", err)
+	}
+	if err := os.MkdirAll(livePath, 0o755); err != nil {
+		t.Fatalf("create live root: %v", err)
+	}
+	strandedPath, err := execenv.ResolveRootDir(strandedParams)
+	if err != nil {
+		t.Fatalf("resolve stranded root: %v", err)
+	}
+
+	// Age every record past GCOrphanTTL; only the stranded one should go.
+	past := time.Now().Add(-31 * 24 * time.Hour)
+	indexDir := filepath.Join(root, ".task_roots")
+	if err := filepath.WalkDir(indexDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, past, past)
+	}); err != nil {
+		t.Fatalf("backdate task root index: %v", err)
+	}
+
+	d.runGC(context.Background())
+
+	// Renaming both is how we observe whether the record survived: a frozen
+	// record ignores the new labels, a reclaimed one re-proposes from them.
+	liveParams.WorkspaceSlug = "Renamed Workspace"
+	liveParams.IssueIdentifier = "NEW-6063"
+	resolvedLive, err := execenv.ResolveRootDir(liveParams)
+	if err != nil {
+		t.Fatalf("resolve live root after GC: %v", err)
+	}
+	if resolvedLive != livePath {
+		t.Fatalf("live task moved from %q to %q; its record was swept while its root exists", livePath, resolvedLive)
+	}
+
+	strandedParams.WorkspaceSlug = "Renamed Workspace"
+	strandedParams.IssueIdentifier = "NEW-6063"
+	resolvedStranded, err := execenv.ResolveRootDir(strandedParams)
+	if err != nil {
+		t.Fatalf("resolve stranded root after GC: %v", err)
+	}
+	if resolvedStranded == strandedPath {
+		t.Fatalf("stranded record at %q survived the GC sweep", strandedPath)
+	}
+}
+
 func TestRunGC_MixedLayoutsUseMetadataWorkspaceIdentity(t *testing.T) {
 	workspaceID := "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
 	legacyIssueID := "11111111-1111-1111-1111-111111111111"
@@ -108,14 +179,19 @@ func TestRunGC_PrunesOnlyTerminalAbandonedTaskRootRecords(t *testing.T) {
 	t.Parallel()
 
 	const (
-		workspaceID  = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
-		terminalTask = "5c57b65b-ee7a-4603-a72d-b659c34a1dc3"
-		runningTask  = "6d68c76c-ff8b-5704-b83e-c76ad45b2ed4"
+		workspaceID     = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
+		terminalTask    = "5c57b65b-ee7a-4603-a72d-b659c34a1dc3"
+		runningTask     = "6d68c76c-ff8b-5704-b83e-c76ad45b2ed4"
+		unavailableTask = "7e79d87d-008c-6805-c94f-d87be56c3fe5"
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/daemon/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		status := "running"
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) >= 2 && parts[len(parts)-2] == unavailableTask {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		if len(parts) >= 2 && parts[len(parts)-2] == terminalTask {
 			status = "failed"
 		}
@@ -131,6 +207,8 @@ func TestRunGC_PrunesOnlyTerminalAbandonedTaskRootRecords(t *testing.T) {
 	}
 	runningParams := terminalParams
 	runningParams.TaskID = runningTask
+	unavailableParams := terminalParams
+	unavailableParams.TaskID = unavailableTask
 	terminalRoot, err := execenv.ResolveRootDir(terminalParams)
 	if err != nil {
 		t.Fatalf("resolve terminal root: %v", err)
@@ -138,6 +216,10 @@ func TestRunGC_PrunesOnlyTerminalAbandonedTaskRootRecords(t *testing.T) {
 	runningRoot, err := execenv.ResolveRootDir(runningParams)
 	if err != nil {
 		t.Fatalf("resolve running root: %v", err)
+	}
+	unavailableRoot, err := execenv.ResolveRootDir(unavailableParams)
+	if err != nil {
+		t.Fatalf("resolve unavailable root: %v", err)
 	}
 
 	indexDir := filepath.Join(d.cfg.WorkspacesRoot, ".task_roots")
@@ -147,7 +229,8 @@ func TestRunGC_PrunesOnlyTerminalAbandonedTaskRootRecords(t *testing.T) {
 	}
 	old := time.Now().Add(-2 * time.Hour)
 	for _, entry := range entries {
-		if err := os.Chtimes(filepath.Join(indexDir, entry.Name()), old, old); err != nil {
+		recordPath := filepath.Join(indexDir, entry.Name(), "root.json")
+		if err := os.Chtimes(recordPath, old, old); err != nil {
 			t.Fatalf("age task root record: %v", err)
 		}
 	}
@@ -173,6 +256,16 @@ func TestRunGC_PrunesOnlyTerminalAbandonedTaskRootRecords(t *testing.T) {
 	}
 	if runningAfterGC != runningRoot {
 		t.Fatalf("GC changed non-terminal task root from %q to %q", runningRoot, runningAfterGC)
+	}
+	unavailableRenamed := unavailableParams
+	unavailableRenamed.WorkspaceSlug = "Renamed Workspace"
+	unavailableRenamed.IssueIdentifier = "NEW-6065"
+	unavailableAfterGC, err := execenv.ResolveRootDir(unavailableRenamed)
+	if err != nil {
+		t.Fatalf("resolve unavailable root after GC: %v", err)
+	}
+	if unavailableAfterGC != unavailableRoot {
+		t.Fatalf("GC changed task root after an inconclusive status check from %q to %q", unavailableRoot, unavailableAfterGC)
 	}
 }
 

@@ -321,10 +321,14 @@ func TestPruneTaskRootIndexBoundsAbandonedEntries(t *testing.T) {
 	}
 	now := time.Now()
 	old := now.Add(-2 * taskRootIndexMinPruneAge)
-	for _, dir := range []string{taskRootRecordDir(terminal), taskRootRecordDir(running), taskRootRecordDir(materialized), stalePending} {
-		if err := os.Chtimes(dir, old, old); err != nil {
-			t.Fatalf("age index entry %s: %v", dir, err)
+	for _, params := range []RootDirParams{terminal, running, materialized} {
+		recordPath := filepath.Join(taskRootRecordDir(params), taskRootRecordFile)
+		if err := os.Chtimes(recordPath, old, old); err != nil {
+			t.Fatalf("age task root record %s: %v", recordPath, err)
 		}
+	}
+	if err := os.Chtimes(stalePending, old, old); err != nil {
+		t.Fatalf("age pending entry %s: %v", stalePending, err)
 	}
 
 	removed, err := PruneTaskRootIndex(root, 0, now, func(_, taskID string) bool {

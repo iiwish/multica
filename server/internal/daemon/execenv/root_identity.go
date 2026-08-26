@@ -13,8 +13,11 @@ import (
 )
 
 const (
-	taskRootIndexDir         = ".task_roots"
-	taskRootRecordFile       = "root.json"
+	taskRootIndexDir   = ".task_roots"
+	taskRootRecordFile = "root.json"
+	// taskRootPendingPrefix names the staging directory installTaskRootRecord
+	// renames into place. A directory still carrying it never became
+	// authoritative for any task.
 	taskRootPendingPrefix    = ".pending-"
 	taskRootIndexMinPruneAge = time.Hour
 )
@@ -37,7 +40,7 @@ func ResolveRootDir(params RootDirParams) (string, error) {
 	recordDir := taskRootRecordDir(params)
 	record, err := readTaskRootRecord(recordDir)
 	if err == nil {
-		return validateTaskRootRecordAt(recordDir, params, record)
+		return validateTaskRootRecord(params, recordDir, record)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -70,7 +73,7 @@ func ResolveRootDir(params RootDirParams) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return validateTaskRootRecordAt(recordDir, params, record)
+	return validateTaskRootRecord(params, recordDir, record)
 }
 
 func taskRootRecordDir(params RootDirParams) string {
@@ -127,30 +130,28 @@ func installTaskRootRecord(recordDir string, record taskRootRecord) error {
 	return nil
 }
 
-func validateTaskRootRecord(params RootDirParams, record taskRootRecord) (string, error) {
+// validateTaskRootRecord fails closed on anything it cannot vouch for: a task
+// that cannot prove which root is its own must not fall back to proposing a
+// fresh one, because the original may still hold live work. That refusal is
+// permanent until an operator intervenes, so every error names recordDir —
+// the one path they need to inspect or remove.
+func validateTaskRootRecord(params RootDirParams, recordDir string, record taskRootRecord) (string, error) {
 	if record.WorkspaceID != params.WorkspaceID || record.TaskID != params.TaskID {
-		return "", fmt.Errorf("execenv: task root record identity mismatch")
+		return "", fmt.Errorf("execenv: task root record %s belongs to workspace %s task %s, not workspace %s task %s",
+			recordDir, record.WorkspaceID, record.TaskID, params.WorkspaceID, params.TaskID)
 	}
 	relative := filepath.Clean(record.RelativePath)
 	if relative == "." || filepath.IsAbs(relative) {
-		return "", fmt.Errorf("execenv: invalid task root relative path %q", record.RelativePath)
+		return "", fmt.Errorf("execenv: task root record %s holds invalid relative path %q", recordDir, record.RelativePath)
 	}
 	parts := strings.Split(relative, string(filepath.Separator))
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parts[0] == ".." || parts[1] == ".." {
-		return "", fmt.Errorf("execenv: invalid task root relative path %q", record.RelativePath)
+		return "", fmt.Errorf("execenv: task root record %s holds invalid relative path %q", recordDir, record.RelativePath)
 	}
 	if !validTaskRootSegment(parts[0], params.WorkspaceID, true) || !validTaskRootSegment(parts[1], params.TaskID, false) {
-		return "", fmt.Errorf("execenv: task root relative path %q does not match its stable identity", record.RelativePath)
+		return "", fmt.Errorf("execenv: task root record %s points at %q, which does not match its stable identity", recordDir, record.RelativePath)
 	}
 	return filepath.Join(params.WorkspacesRoot, relative), nil
-}
-
-func validateTaskRootRecordAt(recordDir string, params RootDirParams, record taskRootRecord) (string, error) {
-	resolved, err := validateTaskRootRecord(params, record)
-	if err != nil {
-		return "", fmt.Errorf("execenv: validate task root record %s: %w", recordDir, err)
-	}
-	return resolved, nil
 }
 
 func validTaskRootSegment(segment, id string, workspace bool) bool {
@@ -186,7 +187,7 @@ func RemoveRootDirRecord(workspacesRoot, envRoot string, owner EnvRootOwner) err
 	if err != nil {
 		return err
 	}
-	resolved, err := validateTaskRootRecordAt(recordDir, params, record)
+	resolved, err := validateTaskRootRecord(params, recordDir, record)
 	if err != nil {
 		return err
 	}
@@ -196,6 +197,11 @@ func RemoveRootDirRecord(workspacesRoot, envRoot string, owner EnvRootOwner) err
 	if err := os.RemoveAll(recordDir); err != nil {
 		return fmt.Errorf("execenv: remove task root record: %w", err)
 	}
+	// The index directory itself is deliberately left in place. Removing it
+	// when the last record goes would race installTaskRootRecord, which does
+	// MkdirAll(parent) and then MkdirTemp(parent, ...): a removal landing
+	// between those two calls hands the claim an ENOENT and fails the task,
+	// which is a poor trade for one empty directory.
 	return nil
 }
 
@@ -226,15 +232,8 @@ func PruneTaskRootIndex(workspacesRoot string, retention time.Duration, now time
 			continue
 		}
 		entryPath := filepath.Join(indexDir, entry.Name())
-		info, infoErr := entry.Info()
-		if errors.Is(infoErr, os.ErrNotExist) {
-			continue
-		}
-		if infoErr != nil {
-			errs = append(errs, fmt.Errorf("inspect task root index entry %s: %w", entryPath, infoErr))
-			continue
-		}
-		if now.Sub(info.ModTime()) <= pruneAge {
+		age, ok := taskRootRecordAge(entryPath, now)
+		if !ok || age <= pruneAge {
 			continue
 		}
 
@@ -249,6 +248,11 @@ func PruneTaskRootIndex(workspacesRoot string, retention time.Duration, now time
 
 		record, recordErr := readTaskRootRecord(entryPath)
 		if errors.Is(recordErr, os.ErrNotExist) {
+			if removeErr := os.RemoveAll(entryPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("remove stale empty task root record %s: %w", entryPath, removeErr))
+				continue
+			}
+			removed++
 			continue
 		}
 		if recordErr != nil {
@@ -260,7 +264,7 @@ func PruneTaskRootIndex(workspacesRoot string, retention time.Duration, now time
 			WorkspaceID:    record.WorkspaceID,
 			TaskID:         record.TaskID,
 		}
-		resolved, validateErr := validateTaskRootRecord(params, record)
+		resolved, validateErr := validateTaskRootRecord(params, entryPath, record)
 		if validateErr != nil {
 			errs = append(errs, fmt.Errorf("validate stale task root record %s: %w", entryPath, validateErr))
 			continue
@@ -343,4 +347,19 @@ func findOwnedTaskRoot(params RootDirParams) (string, error) {
 		}
 	}
 	return found, nil
+}
+
+// taskRootRecordAge dates a record by its file, which is written once inside a
+// staging directory and never rewritten, so its mtime is the install time. A
+// staging directory that died before the write has no file; fall back to the
+// directory itself so those are still reclaimable.
+func taskRootRecordAge(recordDir string, now time.Time) (time.Duration, bool) {
+	if info, err := os.Stat(filepath.Join(recordDir, taskRootRecordFile)); err == nil {
+		return now.Sub(info.ModTime()), true
+	}
+	info, err := os.Stat(recordDir)
+	if err != nil {
+		return 0, false
+	}
+	return now.Sub(info.ModTime()), true
 }
