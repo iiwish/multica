@@ -58,43 +58,70 @@ func createTaskDir(t *testing.T, root, wsID, dirName string, meta *execenv.GCMet
 	return taskDir
 }
 
-// TestRunGC_ReclaimsStrandedTaskRootRecords guards the wiring: cleanTaskDir
-// only removes a stable-root record when it reclaims the root that record
-// points at, so a record whose root never materialised has no other remover,
-// and nothing else walks .task_roots. A live record must survive the same
-// sweep — its absence from disk is the normal pre-Prepare state.
-func TestRunGC_ReclaimsStrandedTaskRootRecords(t *testing.T) {
-	d := newGCTestDaemon(t, http.NewServeMux())
-	root := d.cfg.WorkspacesRoot
+// TestRunGC_StrandedTaskRootRecordsFollowTaskStatus guards the wiring AND the
+// invariant that makes the sweep safe.
+//
+// A record whose env root never materialised has no other remover: cleanTaskDir
+// only fires on a root it reclaims, and nothing else walks .task_roots. But
+// absence of the root cannot authorise removal on its own — ResolveRootDir
+// publishes the record BEFORE Prepare creates the directory, so a record that
+// an aged-out re-dispatch is in the middle of reusing looks identical to a
+// leftover. Deleting there hands the same task a second physical root, which is
+// the orphaning the index exists to prevent.
+//
+// The age gate alone does not separate those two: an old record IS the state a
+// stalled re-dispatch reads. Only the task's own status does, so the sweep asks
+// the server and keeps anything non-terminal.
+func TestRunGC_StrandedTaskRootRecordsFollowTaskStatus(t *testing.T) {
+	root := t.TempDir()
 	const workspaceID = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
+	params := func(taskID string) execenv.RootDirParams {
+		return execenv.RootDirParams{
+			WorkspacesRoot: root, WorkspaceID: workspaceID,
+			WorkspaceSlug: "Asset Feed", TaskID: taskID, IssueIdentifier: "MUL-6063",
+		}
+	}
+	const (
+		runningTask  = "5c57b65b-ee7a-4603-a72d-c760d45b2ed4"
+		terminalTask = "5c57b65b-ee7a-4603-a72d-d871e56c3fe5"
+		liveRootTask = "5c57b65b-ee7a-4603-a72d-b659c34a1dc3"
+	)
+	statuses := map[string]string{
+		runningTask:  "running",
+		terminalTask: "completed",
+		// liveRootTask is terminal too: only its surviving root protects it.
+		liveRootTask: "completed",
+	}
 
-	liveParams := execenv.RootDirParams{
-		WorkspacesRoot: root, WorkspaceID: workspaceID,
-		WorkspaceSlug: "Asset Feed", TaskID: "5c57b65b-ee7a-4603-a72d-b659c34a1dc3",
-		IssueIdentifier: "MUL-6063",
-	}
-	strandedParams := execenv.RootDirParams{
-		WorkspacesRoot: root, WorkspaceID: workspaceID,
-		WorkspaceSlug: "Asset Feed", TaskID: "5c57b65b-ee7a-4603-a72d-c760d45b2ed4",
-		IssueIdentifier: "MUL-6063",
-	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/daemon/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/daemon/tasks/"), "/gc-check")
+		status, ok := statuses[taskID]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": status})
+	})
 
-	livePath, err := execenv.ResolveRootDir(liveParams)
-	if err != nil {
-		t.Fatalf("resolve live root: %v", err)
+	d := newGCTestDaemon(t, mux)
+	d.cfg.WorkspacesRoot = root
+
+	frozen := map[string]string{}
+	for _, taskID := range []string{runningTask, terminalTask, liveRootTask} {
+		resolved, err := execenv.ResolveRootDir(params(taskID))
+		if err != nil {
+			t.Fatalf("resolve root for %s: %v", taskID, err)
+		}
+		frozen[taskID] = resolved
 	}
-	if err := os.MkdirAll(livePath, 0o755); err != nil {
+	// Only this one ever reached ClaimEnvRoot.
+	if err := os.MkdirAll(frozen[liveRootTask], 0o755); err != nil {
 		t.Fatalf("create live root: %v", err)
 	}
-	strandedPath, err := execenv.ResolveRootDir(strandedParams)
-	if err != nil {
-		t.Fatalf("resolve stranded root: %v", err)
-	}
 
-	// Age every record past GCOrphanTTL; only the stranded one should go.
 	past := time.Now().Add(-31 * 24 * time.Hour)
-	indexDir := filepath.Join(root, ".task_roots")
-	if err := filepath.WalkDir(indexDir, func(path string, entry fs.DirEntry, err error) error {
+	if err := filepath.WalkDir(filepath.Join(root, ".task_roots"), func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -105,26 +132,27 @@ func TestRunGC_ReclaimsStrandedTaskRootRecords(t *testing.T) {
 
 	d.runGC(context.Background())
 
-	// Renaming both is how we observe whether the record survived: a frozen
-	// record ignores the new labels, a reclaimed one re-proposes from them.
-	liveParams.WorkspaceSlug = "Renamed Workspace"
-	liveParams.IssueIdentifier = "NEW-6063"
-	resolvedLive, err := execenv.ResolveRootDir(liveParams)
-	if err != nil {
-		t.Fatalf("resolve live root after GC: %v", err)
-	}
-	if resolvedLive != livePath {
-		t.Fatalf("live task moved from %q to %q; its record was swept while its root exists", livePath, resolvedLive)
-	}
-
-	strandedParams.WorkspaceSlug = "Renamed Workspace"
-	strandedParams.IssueIdentifier = "NEW-6063"
-	resolvedStranded, err := execenv.ResolveRootDir(strandedParams)
-	if err != nil {
-		t.Fatalf("resolve stranded root after GC: %v", err)
-	}
-	if resolvedStranded == strandedPath {
-		t.Fatalf("stranded record at %q survived the GC sweep", strandedPath)
+	// Renaming is how we observe survival: a frozen record ignores the new
+	// labels, a reclaimed one re-proposes from them.
+	for _, tc := range []struct {
+		taskID string
+		want   bool
+		why    string
+	}{
+		{runningTask, true, "a non-terminal task's frozen identity was swept; a re-dispatch would now get a second root"},
+		{liveRootTask, true, "a record was swept while its env root still exists"},
+		{terminalTask, false, "a terminal task's stranded record survived the sweep"},
+	} {
+		renamed := params(tc.taskID)
+		renamed.WorkspaceSlug = "Renamed Workspace"
+		renamed.IssueIdentifier = "NEW-6063"
+		resolved, err := execenv.ResolveRootDir(renamed)
+		if err != nil {
+			t.Fatalf("resolve %s after GC: %v", tc.taskID, err)
+		}
+		if kept := resolved == frozen[tc.taskID]; kept != tc.want {
+			t.Errorf("task %s: record kept = %v, want %v — %s", tc.taskID, kept, tc.want, tc.why)
+		}
 	}
 }
 
