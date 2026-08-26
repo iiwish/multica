@@ -213,10 +213,11 @@ func TestScanDiskUsage_MixedLayoutsUseMetadataIdentity(t *testing.T) {
 
 	root := t.TempDir()
 	workspaceID := "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
-	legacyTaskID := "11111111-ee7a-4603-a72d-a548b2390cb2"
 	readableTaskID := "22222222-ee7a-4603-a72d-b659c34a1dc3"
+	legacyTaskSegment := "a548b2390cb2"
+	readableTaskSegment := "mul-6063-b659c34a1dc3"
 
-	legacyDir := filepath.Join(root, workspaceID, ShortID(legacyTaskID))
+	legacyDir := filepath.Join(root, workspaceID, legacyTaskSegment)
 	writeFile(t, filepath.Join(legacyDir, "workdir", "legacy.txt"), 10)
 	mustWriteMeta(t, legacyDir, execenv.GCMeta{
 		Kind:        execenv.GCKindIssue,
@@ -225,7 +226,7 @@ func TestScanDiskUsage_MixedLayoutsUseMetadataIdentity(t *testing.T) {
 		CompletedAt: time.Now().Add(-time.Hour),
 	})
 
-	readableDir := filepath.Join(root, "asset-feed-a548b2390cb2", "mul-6063-b659c34a1dc3")
+	readableDir := filepath.Join(root, "asset-feed-a548b2390cb2", readableTaskSegment)
 	writeFile(t, filepath.Join(readableDir, "workdir", "readable.txt"), 20)
 	mustWriteMeta(t, readableDir, execenv.GCMeta{
 		Kind:        execenv.GCKindIssue,
@@ -251,11 +252,11 @@ func TestScanDiskUsage_MixedLayoutsUseMetadataIdentity(t *testing.T) {
 	for _, task := range report.Tasks {
 		byShort[task.TaskShort] = task
 	}
-	if _, ok := byShort[ShortID(legacyTaskID)]; !ok {
-		t.Errorf("legacy task was not reported under path-derived short id")
+	if _, ok := byShort[legacyTaskSegment]; !ok {
+		t.Errorf("legacy task was not reported under physical directory segment %q", legacyTaskSegment)
 	}
-	if _, ok := byShort[ShortID(readableTaskID)]; !ok {
-		t.Errorf("readable task was not reported under metadata task id")
+	if _, ok := byShort[readableTaskSegment]; !ok {
+		t.Errorf("readable task was not reported under physical directory segment %q", readableTaskSegment)
 	}
 }
 
@@ -292,8 +293,9 @@ func TestScanDiskUsage_ReadableActiveRootUsesOwnerIdentityWithoutGCMeta(t *testi
 	if usage.WorkspaceID != workspaceID {
 		t.Fatalf("workspace_id = %q, want owner identity %q", usage.WorkspaceID, workspaceID)
 	}
-	if usage.TaskShort != ShortID(taskID) {
-		t.Fatalf("task_short = %q, want %q", usage.TaskShort, ShortID(taskID))
+	wantTaskSegment := filepath.Base(env.RootDir)
+	if usage.TaskShort != wantTaskSegment {
+		t.Fatalf("task_short = %q, want physical directory segment %q", usage.TaskShort, wantTaskSegment)
 	}
 	if len(report.Workspaces) != 1 || report.Workspaces[0].WorkspaceID != workspaceID {
 		t.Fatalf("workspace aggregate = %+v, want authoritative workspace %q", report.Workspaces, workspaceID)

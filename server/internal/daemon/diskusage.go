@@ -325,18 +325,12 @@ func buildTaskUsage(taskDir, wsID, taskShort string, matcher artifactMatcher) Ta
 			usage.WorkspaceID = workspaceID
 			usage.WorkspaceShort = ShortID(workspaceID)
 		}
-		if taskID := strings.TrimSpace(owner.TaskID); taskID != "" {
-			usage.TaskShort = ShortID(taskID)
-		}
 	}
 	if meta, err := execenv.ReadGCMeta(taskDir); err == nil && meta != nil {
 		metaPresent = true
 		if workspaceID := strings.TrimSpace(meta.WorkspaceID); workspaceID != "" {
 			usage.WorkspaceID = workspaceID
 			usage.WorkspaceShort = ShortID(workspaceID)
-		}
-		if taskID := strings.TrimSpace(meta.TaskID); taskID != "" {
-			usage.TaskShort = ShortID(taskID)
 		}
 		usage.Kind = string(meta.Kind)
 		usage.ParentID = parentIDForMeta(meta)
