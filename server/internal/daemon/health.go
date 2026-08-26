@@ -75,6 +75,7 @@ type HealthResponse struct {
 	// the last barrier check and will retry when idle. Omitted when empty, so
 	// older consumers see no change. Diagnostic only: nothing keys off it.
 	ReloadPendingReason string            `json:"reload_pending_reason,omitempty"`
+	GCPolicy            GCPolicySnapshot  `json:"gc_policy"`
 	Workspaces          []healthWorkspace `json:"workspaces"`
 }
 
@@ -341,7 +342,14 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 			SkippedAgents:         d.skippedAgentsSnapshot(),
 
 			ReloadPendingReason: d.reloadPending(),
-			Workspaces:          wsList,
+			GCPolicy: GCPolicySnapshot{
+				Enabled:                 d.cfg.GCEnabled,
+				TTLSeconds:              int64(d.cfg.GCTTL / time.Second),
+				CompletedTaskTTLSeconds: int64(d.cfg.GCCompletedTaskTTL / time.Second),
+				OrphanTTLSeconds:        int64(d.cfg.GCOrphanTTL / time.Second),
+				ArtifactTTLSeconds:      int64(d.cfg.GCArtifactTTL / time.Second),
+			},
+			Workspaces: wsList,
 		}
 		if reporter, ok := d.repoCache.(interface{ Activity() repocache.Activity }); ok {
 			activity := reporter.Activity()

@@ -5029,6 +5029,9 @@ const (
 
 type batchIssueGCCheckRequest struct {
 	IssueIDs []string `json:"issue_ids"`
+	// TaskIDs is optional diagnostic input from `daemon disk-usage`. Older
+	// daemons omit it, so the periodic GC path keeps its existing query cost.
+	TaskIDs []string `json:"task_ids,omitempty"`
 }
 
 type batchIssueGCCheckItem struct {
@@ -5036,6 +5039,12 @@ type batchIssueGCCheckItem struct {
 	Found     bool       `json:"found"`
 	Status    string     `json:"status,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+type batchIssueTaskEnvironmentItem struct {
+	TaskID          string `json:"task_id"`
+	Found           bool   `json:"found"`
+	ResumeCandidate bool   `json:"resume_candidate,omitempty"`
 }
 
 // BatchIssueGCCheck returns one explicit result for every requested issue ID.
@@ -5059,8 +5068,8 @@ func (h *Handler) BatchIssueGCCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(req.IssueIDs) > maxIssueGCBatchSize {
-		writeError(w, http.StatusBadRequest, "too many issue_ids")
+	if len(req.IssueIDs) > maxIssueGCBatchSize || len(req.TaskIDs) > maxIssueGCBatchSize {
+		writeError(w, http.StatusBadRequest, "too many ids")
 		return
 	}
 
@@ -5116,7 +5125,76 @@ func (h *Handler) BatchIssueGCCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"issues": items})
+
+	// Resume-candidate inspection is intentionally opt-in. `disk-usage` sends
+	// the task ids found in local GC metadata; the normal daemon GC request does
+	// not, so this cannot add point queries to the periodic cleanup loop.
+	// Resolve ownership in one workspace-scoped query, then run the canonical
+	// GetLastTaskSession selection once per distinct (agent, issue) pair. That
+	// query owns the poison/retired-session rules used by claim, avoiding a
+	// second approximation that could label a dead workdir resumable.
+	environments := make([]batchIssueTaskEnvironmentItem, 0, len(req.TaskIDs))
+	if len(req.TaskIDs) > 0 {
+		parsedTaskIDs := make([]pgtype.UUID, 0, len(req.TaskIDs))
+		canonicalTaskIDs := make([]string, 0, len(req.TaskIDs))
+		for _, taskID := range req.TaskIDs {
+			parsedID, err := util.ParseUUID(taskID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid task_id")
+				return
+			}
+			parsedTaskIDs = append(parsedTaskIDs, parsedID)
+			canonicalTaskIDs = append(canonicalTaskIDs, uuidToString(parsedID))
+		}
+
+		subjectRows, err := h.Queries.ListIssueTaskEnvironmentSubjects(r.Context(), db.ListIssueTaskEnvironmentSubjectsParams{
+			WorkspaceID: workspaceUUID,
+			TaskIds:     parsedTaskIDs,
+		})
+		if err != nil {
+			slog.Warn("list issue task environment subjects failed", "workspace_id", workspaceID, "count", len(parsedTaskIDs), "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to inspect task environments")
+			return
+		}
+
+		subjects := make(map[string]db.ListIssueTaskEnvironmentSubjectsRow, len(subjectRows))
+		workdirByScope := make(map[string]string)
+		for _, subject := range subjectRows {
+			taskID := uuidToString(subject.ID)
+			subjects[taskID] = subject
+			scopeKey := uuidToString(subject.AgentID) + "/" + uuidToString(subject.IssueID)
+			if _, seen := workdirByScope[scopeKey]; seen {
+				continue
+			}
+			prior, priorErr := h.Queries.GetLastTaskSession(r.Context(), db.GetLastTaskSessionParams{
+				AgentID: subject.AgentID,
+				IssueID: subject.IssueID,
+			})
+			switch {
+			case priorErr == nil && prior.WorkDir.Valid:
+				workdirByScope[scopeKey] = prior.WorkDir.String
+			case priorErr == nil || errors.Is(priorErr, pgx.ErrNoRows):
+				workdirByScope[scopeKey] = ""
+			default:
+				slog.Warn("resolve issue task resume candidate failed", "workspace_id", workspaceID, "error", priorErr)
+				writeError(w, http.StatusInternalServerError, "failed to inspect task environments")
+				return
+			}
+		}
+
+		for _, taskID := range canonicalTaskIDs {
+			subject, found := subjects[taskID]
+			item := batchIssueTaskEnvironmentItem{TaskID: taskID, Found: found}
+			if found {
+				scopeKey := uuidToString(subject.AgentID) + "/" + uuidToString(subject.IssueID)
+				item.ResumeCandidate = subject.WorkDir.Valid && subject.WorkDir.String != "" &&
+					subject.WorkDir.String == workdirByScope[scopeKey]
+			}
+			environments = append(environments, item)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"issues": items, "task_environments": environments})
 }
 
 // GetIssueGCCheck returns minimal issue info needed by older daemon GC loops.

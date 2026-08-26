@@ -1259,6 +1259,70 @@ func TestBatchIssueGCCheck_WithDaemonToken(t *testing.T) {
 	w = testutil.Call(t, testHandler.BatchIssueGCCheck, req).Want(http.StatusNotFound)
 }
 
+func TestBatchIssueGCCheck_ReportsCurrentResumeCandidate(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	runtimeID := handlerTestRuntimeID(t)
+	agentID := dbfx.Agent(t, "disk usage resume candidate agent", runtimeID)
+	issueID := dbfx.Issue(t, "disk usage resume candidate issue")
+	olderTaskID := dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id":     issueID,
+		"runtime_id":   runtimeID,
+		"status":       "completed",
+		"session_id":   uuid.NewString(),
+		"work_dir":     "/tmp/multica-older/workdir",
+		"completed_at": testutil.Raw("now() - interval '2 hours'"),
+	})
+	currentTaskID := dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id":     issueID,
+		"runtime_id":   runtimeID,
+		"status":       "completed",
+		"session_id":   uuid.NewString(),
+		"work_dir":     "/tmp/multica-current/workdir",
+		"completed_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+	missingTaskID := "00000000-0000-0000-0000-000000000099"
+
+	req := newDaemonTokenRequest("POST", "/api/daemon/workspaces/"+testWorkspaceID+"/issues/gc-check", map[string]any{
+		"issue_ids": []string{issueID},
+		"task_ids":  []string{olderTaskID, currentTaskID, missingTaskID},
+	}, testWorkspaceID, "legit-daemon")
+	req = withURLParam(req, "workspaceId", testWorkspaceID)
+	w := testutil.Call(t, testHandler.BatchIssueGCCheck, req).Want(http.StatusOK)
+
+	var resp struct {
+		TaskEnvironments []struct {
+			TaskID          string `json:"task_id"`
+			Found           bool   `json:"found"`
+			ResumeCandidate bool   `json:"resume_candidate"`
+		} `json:"task_environments"`
+	}
+	w.JSON(&resp)
+	if len(resp.TaskEnvironments) != 3 {
+		t.Fatalf("task_environments length = %d, want 3: %s", len(resp.TaskEnvironments), w.Body.String())
+	}
+	want := map[string]struct {
+		found     bool
+		candidate bool
+	}{
+		olderTaskID:   {found: true, candidate: false},
+		currentTaskID: {found: true, candidate: true},
+		missingTaskID: {found: false, candidate: false},
+	}
+	for _, item := range resp.TaskEnvironments {
+		expected, ok := want[item.TaskID]
+		if !ok {
+			t.Fatalf("unexpected task environment result: %+v", item)
+		}
+		if item.Found != expected.found || item.ResumeCandidate != expected.candidate {
+			t.Errorf("task environment %s = found:%v candidate:%v, want found:%v candidate:%v",
+				item.TaskID, item.Found, item.ResumeCandidate, expected.found, expected.candidate)
+		}
+	}
+}
+
 // withURLParams merges the given chi URL parameters into the request context.
 // Unlike calling withURLParam twice (which replaces the whole chi.RouteContext
 // and loses earlier params), this preserves previously-added params.

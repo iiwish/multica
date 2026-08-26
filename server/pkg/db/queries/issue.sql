@@ -77,6 +77,16 @@ FROM issue
 WHERE workspace_id = sqlc.arg('workspace_id')
   AND id = ANY(sqlc.arg('issue_ids')::uuid[]);
 
+-- name: ListIssueTaskEnvironmentSubjects :many
+-- Resolve task ids supplied by a local daemon diagnostic to their trusted
+-- (agent, issue, work_dir) scope. The workspace join is the authorization
+-- boundary: callers cannot use a task id to inspect another workspace.
+SELECT t.id, t.agent_id, t.issue_id, t.work_dir
+FROM agent_task_queue t
+JOIN issue i ON i.id = t.issue_id
+WHERE i.workspace_id = sqlc.arg('workspace_id')
+  AND t.id = ANY(sqlc.arg('task_ids')::uuid[]);
+
 -- name: GetIssueInWorkspace :one
 SELECT * FROM issue
 WHERE id = $1 AND workspace_id = $2;

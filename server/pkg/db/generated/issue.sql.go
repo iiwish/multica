@@ -1011,6 +1011,54 @@ func (q *Queries) ListIssueGCStatuses(ctx context.Context, arg ListIssueGCStatus
 	return items, nil
 }
 
+const listIssueTaskEnvironmentSubjects = `-- name: ListIssueTaskEnvironmentSubjects :many
+SELECT t.id, t.agent_id, t.issue_id, t.work_dir
+FROM agent_task_queue t
+JOIN issue i ON i.id = t.issue_id
+WHERE i.workspace_id = $1
+  AND t.id = ANY($2::uuid[])
+`
+
+type ListIssueTaskEnvironmentSubjectsParams struct {
+	WorkspaceID pgtype.UUID   `json:"workspace_id"`
+	TaskIds     []pgtype.UUID `json:"task_ids"`
+}
+
+type ListIssueTaskEnvironmentSubjectsRow struct {
+	ID      pgtype.UUID `json:"id"`
+	AgentID pgtype.UUID `json:"agent_id"`
+	IssueID pgtype.UUID `json:"issue_id"`
+	WorkDir pgtype.Text `json:"work_dir"`
+}
+
+// Resolve task ids supplied by a local daemon diagnostic to their trusted
+// (agent, issue, work_dir) scope. The workspace join is the authorization
+// boundary: callers cannot use a task id to inspect another workspace.
+func (q *Queries) ListIssueTaskEnvironmentSubjects(ctx context.Context, arg ListIssueTaskEnvironmentSubjectsParams) ([]ListIssueTaskEnvironmentSubjectsRow, error) {
+	rows, err := q.db.Query(ctx, listIssueTaskEnvironmentSubjects, arg.WorkspaceID, arg.TaskIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIssueTaskEnvironmentSubjectsRow{}
+	for rows.Next() {
+		var i ListIssueTaskEnvironmentSubjectsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.WorkDir,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listIssues = `-- name: ListIssues :many
 SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
