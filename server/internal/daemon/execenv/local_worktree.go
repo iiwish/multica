@@ -59,6 +59,14 @@ const (
 	// waiting minutes on it would only delay telling them so.
 	stashCaptureAttempts   = 5
 	stashCaptureRetryDelay = 100 * time.Millisecond
+
+	// worktreeRemoveAttempts / worktreeRemoveRetryDelay give Windows indexers,
+	// antivirus, and EDR scanners a short window to release the emptied
+	// worktree directory. os.RemoveAll can remove every child and still fail on
+	// the final directory handle; retrying the same path then completes the
+	// cleanup without turning successful agent work into a failed task (#7548).
+	worktreeRemoveAttempts   = 5
+	worktreeRemoveRetryDelay = 100 * time.Millisecond
 )
 
 // LocalWorktreeParams describes the worktree Prepare should build for a
@@ -549,7 +557,7 @@ func removeLocalWorktreeDir(gitRoot, worktreePath string, logger *slog.Logger) e
 		// Fall back to deleting the directory ourselves and dropping the now
 		// dangling registration, so the user's repo isn't left listing a
 		// worktree that no longer exists.
-		if rmErr := os.RemoveAll(worktreePath); rmErr != nil {
+		if rmErr := removeAllWithRetry(worktreePath, os.RemoveAll, time.Sleep); rmErr != nil {
 			removeErr = errors.Join(removeErr, rmErr)
 			if logger != nil {
 				logger.Warn("execenv: remove worktree directory failed", "path", worktreePath, "error", rmErr)
@@ -570,6 +578,19 @@ func removeLocalWorktreeDir(gitRoot, worktreePath string, logger *slog.Logger) e
 		return fmt.Errorf("worktree directory still exists after removal fallback: %w", removeErr)
 	}
 	return errors.New("worktree directory still exists after git removal reported success")
+}
+
+func removeAllWithRetry(path string, removeAll func(string) error, sleep func(time.Duration)) error {
+	var err error
+	for attempt := 0; attempt < worktreeRemoveAttempts; attempt++ {
+		if err = removeAll(path); err == nil {
+			return nil
+		}
+		if attempt+1 < worktreeRemoveAttempts {
+			sleep(worktreeRemoveRetryDelay << attempt)
+		}
+	}
+	return err
 }
 
 // deleteBranch drops a task branch that carries nothing worth keeping — an

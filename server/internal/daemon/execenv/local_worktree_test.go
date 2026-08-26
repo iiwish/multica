@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func worktreeTestLogger() *slog.Logger {
@@ -479,6 +480,61 @@ func finalizeOK(t *testing.T, wt *LocalWorktree) LocalWorktreeOutcome {
 		t.Fatalf("Finalize: %v", err)
 	}
 	return outcome
+}
+
+func TestRemoveAllWithRetryRecoversFromTransientFailure(t *testing.T) {
+	transientErr := errors.New("directory is in use")
+	attempts := 0
+	var delays []time.Duration
+
+	err := removeAllWithRetry("worktree", func(path string) error {
+		if path != "worktree" {
+			t.Fatalf("path = %q, want worktree", path)
+		}
+		attempts++
+		if attempts < 3 {
+			return transientErr
+		}
+		return nil
+	}, func(delay time.Duration) {
+		delays = append(delays, delay)
+	})
+
+	if err != nil {
+		t.Fatalf("removeAllWithRetry: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+	if len(delays) != 2 || delays[0] != 100*time.Millisecond || delays[1] != 200*time.Millisecond {
+		t.Errorf("delays = %v, want [100ms 200ms]", delays)
+	}
+}
+
+func TestRemoveAllWithRetryReturnsLastErrorAfterBoundedAttempts(t *testing.T) {
+	wantErr := errors.New("persistent directory lock")
+	attempts := 0
+	var delays []time.Duration
+
+	err := removeAllWithRetry("worktree", func(string) error {
+		attempts++
+		return wantErr
+	}, func(delay time.Duration) {
+		delays = append(delays, delay)
+	})
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+	if attempts != worktreeRemoveAttempts {
+		t.Fatalf("attempts = %d, want %d", attempts, worktreeRemoveAttempts)
+	}
+	if len(delays) != worktreeRemoveAttempts-1 {
+		t.Fatalf("delay count = %d, want %d", len(delays), worktreeRemoveAttempts-1)
+	}
+	if got := delays[len(delays)-1]; got != 800*time.Millisecond {
+		t.Errorf("last delay = %v, want 800ms", got)
+	}
 }
 
 // The one operation in this flow that can destroy work is `git worktree remove
