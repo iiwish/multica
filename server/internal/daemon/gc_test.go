@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,76 @@ func createTaskDir(t *testing.T, root, wsID, dirName string, meta *execenv.GCMet
 		}
 	}
 	return taskDir
+}
+
+// TestRunGC_ReclaimsStrandedTaskRootRecords guards the wiring: cleanTaskDir
+// only removes a stable-root record when it reclaims the root that record
+// points at, so a record whose root never materialised has no other remover,
+// and nothing else walks .task_roots. A live record must survive the same
+// sweep — its absence from disk is the normal pre-Prepare state.
+func TestRunGC_ReclaimsStrandedTaskRootRecords(t *testing.T) {
+	d := newGCTestDaemon(t, http.NewServeMux())
+	root := d.cfg.WorkspacesRoot
+	const workspaceID = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
+
+	liveParams := execenv.RootDirParams{
+		WorkspacesRoot: root, WorkspaceID: workspaceID,
+		WorkspaceSlug: "Asset Feed", TaskID: "5c57b65b-ee7a-4603-a72d-b659c34a1dc3",
+		IssueIdentifier: "MUL-6063",
+	}
+	strandedParams := execenv.RootDirParams{
+		WorkspacesRoot: root, WorkspaceID: workspaceID,
+		WorkspaceSlug: "Asset Feed", TaskID: "5c57b65b-ee7a-4603-a72d-c760d45b2ed4",
+		IssueIdentifier: "MUL-6063",
+	}
+
+	livePath, err := execenv.ResolveRootDir(liveParams)
+	if err != nil {
+		t.Fatalf("resolve live root: %v", err)
+	}
+	if err := os.MkdirAll(livePath, 0o755); err != nil {
+		t.Fatalf("create live root: %v", err)
+	}
+	strandedPath, err := execenv.ResolveRootDir(strandedParams)
+	if err != nil {
+		t.Fatalf("resolve stranded root: %v", err)
+	}
+
+	// Age every record past GCOrphanTTL; only the stranded one should go.
+	past := time.Now().Add(-31 * 24 * time.Hour)
+	indexDir := filepath.Join(root, ".task_roots")
+	if err := filepath.WalkDir(indexDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, past, past)
+	}); err != nil {
+		t.Fatalf("backdate task root index: %v", err)
+	}
+
+	d.runGC(context.Background())
+
+	// Renaming both is how we observe whether the record survived: a frozen
+	// record ignores the new labels, a reclaimed one re-proposes from them.
+	liveParams.WorkspaceSlug = "Renamed Workspace"
+	liveParams.IssueIdentifier = "NEW-6063"
+	resolvedLive, err := execenv.ResolveRootDir(liveParams)
+	if err != nil {
+		t.Fatalf("resolve live root after GC: %v", err)
+	}
+	if resolvedLive != livePath {
+		t.Fatalf("live task moved from %q to %q; its record was swept while its root exists", livePath, resolvedLive)
+	}
+
+	strandedParams.WorkspaceSlug = "Renamed Workspace"
+	strandedParams.IssueIdentifier = "NEW-6063"
+	resolvedStranded, err := execenv.ResolveRootDir(strandedParams)
+	if err != nil {
+		t.Fatalf("resolve stranded root after GC: %v", err)
+	}
+	if resolvedStranded == strandedPath {
+		t.Fatalf("stranded record at %q survived the GC sweep", strandedPath)
+	}
 }
 
 func TestRunGC_MixedLayoutsUseMetadataWorkspaceIdentity(t *testing.T) {

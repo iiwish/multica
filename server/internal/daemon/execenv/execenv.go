@@ -1638,5 +1638,14 @@ func envRootHoldsWork(envRoot string) (bool, error) {
 }
 
 func isEnvRootBookkeeping(name string) bool {
-	return name == envRootOwnerFile || name == envRootLockFile
+	if name == envRootOwnerFile || name == envRootLockFile {
+		return true
+	}
+	// An unpublished owner temp is a crash leftover from writeEnvRootOwner, not
+	// task content. claimEnvRoot clears these before it looks, but
+	// findOwnedTaskRoot inspects candidate roots WITHOUT the lock — and reading
+	// one as work makes adoption refuse a root that holds nothing a task could
+	// lose, wedging that task permanently.
+	return strings.HasPrefix(name, envRootOwnerTempPrefix) &&
+		strings.HasSuffix(name, envRootOwnerTempSuffix)
 }

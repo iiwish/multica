@@ -74,6 +74,7 @@ type gcStats struct {
 	hermesSessionStoresReclaimed int            // per-conversation Hermes session stores reclaimed past their TTL
 	repoCachesReclaimed          int            // bare repo caches under .repos evicted past their TTL
 	taskTempDirsReclaimed        int            // per-task temp dirs under the temp base reclaimed after their owning execution ended
+	taskRootRecordsReclaimed     int            // stable-root index entries under .task_roots whose env root no longer exists
 	bytesReclaimed               int64          // total bytes freed in this cycle
 	byPattern                    map[string]int // configured basename or managed path label -> reclaim count
 }
@@ -151,7 +152,19 @@ func (d *Daemon) runGC(ctx context.Context) {
 		}
 	}
 
-	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 {
+	// Reclaim stable-root index entries whose env root is gone. cleanTaskDir
+	// removes a record when it reclaims the root that record points at, but
+	// only when .task_owner still names both ids — so a record for a task that
+	// never reached ClaimEnvRoot, or a root whose marker was lost, has no other
+	// remover. It also has no other reader: the task walk above and
+	// ScanDiskUsage both skip dot-directories, so the leftovers are invisible
+	// as well as unbounded. GCOrphanTTL is the right gate for the same reason
+	// orphanByMTime uses it — age is the only signal there is.
+	if recordsRemoved := execenv.PruneTaskRootRecords(root, d.cfg.GCOrphanTTL, time.Now(), d.logger); recordsRemoved > 0 {
+		stats.taskRootRecordsReclaimed += recordsRemoved
+	}
+
+	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.taskRootRecordsReclaimed > 0 {
 		d.logger.Info("gc: cycle complete",
 			"cleaned", stats.cleaned,
 			"orphaned", stats.orphaned,
@@ -163,6 +176,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 			"hermes_session_stores_reclaimed", stats.hermesSessionStoresReclaimed,
 			"repo_caches_reclaimed", stats.repoCachesReclaimed,
 			"task_temp_dirs_reclaimed", stats.taskTempDirsReclaimed,
+			"task_root_records_reclaimed", stats.taskRootRecordsReclaimed,
 			"bytes_reclaimed", stats.bytesReclaimed,
 			"by_pattern", stats.byPattern,
 		)
