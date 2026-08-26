@@ -104,6 +104,78 @@ func TestRunGC_MixedLayoutsUseMetadataWorkspaceIdentity(t *testing.T) {
 	}
 }
 
+func TestRunGC_PrunesOnlyTerminalAbandonedTaskRootRecords(t *testing.T) {
+	t.Parallel()
+
+	const (
+		workspaceID  = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
+		terminalTask = "5c57b65b-ee7a-4603-a72d-b659c34a1dc3"
+		runningTask  = "6d68c76c-ff8b-5704-b83e-c76ad45b2ed4"
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/daemon/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		status := "running"
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) >= 2 && parts[len(parts)-2] == terminalTask {
+			status = "failed"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": status})
+	})
+
+	d := newGCTestDaemon(t, mux)
+	d.cfg.GCOrphanTTL = time.Hour
+	terminalParams := execenv.RootDirParams{
+		WorkspacesRoot: d.cfg.WorkspacesRoot,
+		WorkspaceID:    workspaceID,
+		TaskID:         terminalTask,
+	}
+	runningParams := terminalParams
+	runningParams.TaskID = runningTask
+	terminalRoot, err := execenv.ResolveRootDir(terminalParams)
+	if err != nil {
+		t.Fatalf("resolve terminal root: %v", err)
+	}
+	runningRoot, err := execenv.ResolveRootDir(runningParams)
+	if err != nil {
+		t.Fatalf("resolve running root: %v", err)
+	}
+
+	indexDir := filepath.Join(d.cfg.WorkspacesRoot, ".task_roots")
+	entries, err := os.ReadDir(indexDir)
+	if err != nil {
+		t.Fatalf("read task root index: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	for _, entry := range entries {
+		if err := os.Chtimes(filepath.Join(indexDir, entry.Name()), old, old); err != nil {
+			t.Fatalf("age task root record: %v", err)
+		}
+	}
+
+	d.runGC(t.Context())
+
+	terminalRenamed := terminalParams
+	terminalRenamed.WorkspaceSlug = "Renamed Workspace"
+	terminalRenamed.IssueIdentifier = "NEW-6063"
+	terminalAfterGC, err := execenv.ResolveRootDir(terminalRenamed)
+	if err != nil {
+		t.Fatalf("resolve terminal root after GC: %v", err)
+	}
+	if terminalAfterGC == terminalRoot {
+		t.Fatalf("terminal abandoned record still froze root %q", terminalAfterGC)
+	}
+	runningRenamed := runningParams
+	runningRenamed.WorkspaceSlug = "Renamed Workspace"
+	runningRenamed.IssueIdentifier = "NEW-6064"
+	runningAfterGC, err := execenv.ResolveRootDir(runningRenamed)
+	if err != nil {
+		t.Fatalf("resolve running root after GC: %v", err)
+	}
+	if runningAfterGC != runningRoot {
+		t.Fatalf("GC changed non-terminal task root from %q to %q", runningRoot, runningAfterGC)
+	}
+}
+
 func TestShouldCleanTaskDir_DoneIssueOverTTL(t *testing.T) {
 	t.Parallel()
 	issueID := "11111111-1111-1111-1111-111111111111"

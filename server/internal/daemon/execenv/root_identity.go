@@ -9,11 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
-	taskRootIndexDir   = ".task_roots"
-	taskRootRecordFile = "root.json"
+	taskRootIndexDir         = ".task_roots"
+	taskRootRecordFile       = "root.json"
+	taskRootPendingPrefix    = ".pending-"
+	taskRootIndexMinPruneAge = time.Hour
 )
 
 type taskRootRecord struct {
@@ -34,7 +37,7 @@ func ResolveRootDir(params RootDirParams) (string, error) {
 	recordDir := taskRootRecordDir(params)
 	record, err := readTaskRootRecord(recordDir)
 	if err == nil {
-		return validateTaskRootRecord(params, record)
+		return validateTaskRootRecordAt(recordDir, params, record)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -67,7 +70,7 @@ func ResolveRootDir(params RootDirParams) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return validateTaskRootRecord(params, record)
+	return validateTaskRootRecordAt(recordDir, params, record)
 }
 
 func taskRootRecordDir(params RootDirParams) string {
@@ -84,13 +87,14 @@ func stableIdentityKey(value string) string {
 }
 
 func readTaskRootRecord(recordDir string) (taskRootRecord, error) {
-	data, err := os.ReadFile(filepath.Join(recordDir, taskRootRecordFile))
+	recordPath := filepath.Join(recordDir, taskRootRecordFile)
+	data, err := os.ReadFile(recordPath)
 	if err != nil {
 		return taskRootRecord{}, err
 	}
 	var record taskRootRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return taskRootRecord{}, fmt.Errorf("execenv: decode task root record: %w", err)
+		return taskRootRecord{}, fmt.Errorf("execenv: decode task root record %s: %w", recordPath, err)
 	}
 	return record, nil
 }
@@ -100,7 +104,7 @@ func installTaskRootRecord(recordDir string, record taskRootRecord) error {
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("execenv: create task root index: %w", err)
 	}
-	tmpDir, err := os.MkdirTemp(parent, ".pending-")
+	tmpDir, err := os.MkdirTemp(parent, taskRootPendingPrefix)
 	if err != nil {
 		return fmt.Errorf("execenv: create task root record: %w", err)
 	}
@@ -141,6 +145,14 @@ func validateTaskRootRecord(params RootDirParams, record taskRootRecord) (string
 	return filepath.Join(params.WorkspacesRoot, relative), nil
 }
 
+func validateTaskRootRecordAt(recordDir string, params RootDirParams, record taskRootRecord) (string, error) {
+	resolved, err := validateTaskRootRecord(params, record)
+	if err != nil {
+		return "", fmt.Errorf("execenv: validate task root record %s: %w", recordDir, err)
+	}
+	return resolved, nil
+}
+
 func validTaskRootSegment(segment, id string, workspace bool) bool {
 	segment = strings.ToLower(segment)
 	id = strings.ToLower(id)
@@ -174,7 +186,7 @@ func RemoveRootDirRecord(workspacesRoot, envRoot string, owner EnvRootOwner) err
 	if err != nil {
 		return err
 	}
-	resolved, err := validateTaskRootRecord(params, record)
+	resolved, err := validateTaskRootRecordAt(recordDir, params, record)
 	if err != nil {
 		return err
 	}
@@ -184,9 +196,91 @@ func RemoveRootDirRecord(workspacesRoot, envRoot string, owner EnvRootOwner) err
 	if err := os.RemoveAll(recordDir); err != nil {
 		return fmt.Errorf("execenv: remove task root record: %w", err)
 	}
-	// Best effort: this succeeds only after the final task record is gone.
-	_ = os.Remove(filepath.Join(workspacesRoot, taskRootIndexDir))
 	return nil
+}
+
+// PruneTaskRootIndex removes abandoned unpublished directories and stable
+// records whose physical env root never materialized. Complete records are
+// removed only when eligible confirms the task is terminal or inaccessible;
+// a live/non-terminal task keeps its frozen path even when the root is absent.
+//
+// A minimum grace period protects the tiny publication window even when the
+// operator configures the general orphan TTL as zero.
+func PruneTaskRootIndex(workspacesRoot string, retention time.Duration, now time.Time, eligible func(workspaceID, taskID string) bool) (removed int, err error) {
+	indexDir := filepath.Join(workspacesRoot, taskRootIndexDir)
+	entries, readErr := os.ReadDir(indexDir)
+	if errors.Is(readErr, os.ErrNotExist) {
+		return 0, nil
+	}
+	if readErr != nil {
+		return 0, fmt.Errorf("execenv: read task root index: %w", readErr)
+	}
+
+	pruneAge := retention
+	if pruneAge < taskRootIndexMinPruneAge {
+		pruneAge = taskRootIndexMinPruneAge
+	}
+	var errs []error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		entryPath := filepath.Join(indexDir, entry.Name())
+		info, infoErr := entry.Info()
+		if errors.Is(infoErr, os.ErrNotExist) {
+			continue
+		}
+		if infoErr != nil {
+			errs = append(errs, fmt.Errorf("inspect task root index entry %s: %w", entryPath, infoErr))
+			continue
+		}
+		if now.Sub(info.ModTime()) <= pruneAge {
+			continue
+		}
+
+		if strings.HasPrefix(entry.Name(), taskRootPendingPrefix) {
+			if removeErr := os.RemoveAll(entryPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("remove stale task root pending entry %s: %w", entryPath, removeErr))
+				continue
+			}
+			removed++
+			continue
+		}
+
+		record, recordErr := readTaskRootRecord(entryPath)
+		if errors.Is(recordErr, os.ErrNotExist) {
+			continue
+		}
+		if recordErr != nil {
+			errs = append(errs, fmt.Errorf("read stale task root record %s: %w", entryPath, recordErr))
+			continue
+		}
+		params := RootDirParams{
+			WorkspacesRoot: workspacesRoot,
+			WorkspaceID:    record.WorkspaceID,
+			TaskID:         record.TaskID,
+		}
+		resolved, validateErr := validateTaskRootRecord(params, record)
+		if validateErr != nil {
+			errs = append(errs, fmt.Errorf("validate stale task root record %s: %w", entryPath, validateErr))
+			continue
+		}
+		if _, statErr := os.Stat(resolved); statErr == nil {
+			continue
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("inspect env root for record %s: %w", entryPath, statErr))
+			continue
+		}
+		if eligible == nil || !eligible(record.WorkspaceID, record.TaskID) {
+			continue
+		}
+		if removeErr := os.RemoveAll(entryPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove stale task root record %s: %w", entryPath, removeErr))
+			continue
+		}
+		removed++
+	}
+	return removed, errors.Join(errs...)
 }
 
 // findOwnedTaskRoot adopts roots created before the stable index existed. The

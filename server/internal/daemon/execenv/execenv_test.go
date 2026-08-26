@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func testLogger() *slog.Logger {
@@ -169,6 +170,47 @@ func TestResolveRootDirAdoptsExistingOwnedRootBeforeIndex(t *testing.T) {
 	}
 }
 
+func TestResolveRootDirAdoptsRootWithInterruptedOwnerTemp(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	const (
+		workspaceID = "a05b0e10-ee7a-4603-a72d-a548b2390cb2"
+		taskID      = "5c57b65b-ee7a-4603-a72d-b659c34a1dc3"
+	)
+	original := PredictRootDir(RootDirParams{
+		WorkspacesRoot:  root,
+		WorkspaceID:     workspaceID,
+		WorkspaceSlug:   "Asset Feed",
+		TaskID:          taskID,
+		IssueIdentifier: "MUL-6063",
+	})
+	if err := os.MkdirAll(original, 0o755); err != nil {
+		t.Fatalf("seed existing root: %v", err)
+	}
+	tempOwner := filepath.Join(original, envRootOwnerTempPrefix+"crashed"+envRootOwnerTempSuffix)
+	if err := os.WriteFile(tempOwner, []byte(`{"workspace_id":"`+workspaceID+`"`), 0o600); err != nil {
+		t.Fatalf("seed interrupted owner temp: %v", err)
+	}
+
+	resolved, err := ResolveRootDir(RootDirParams{
+		WorkspacesRoot:  root,
+		WorkspaceID:     workspaceID,
+		WorkspaceSlug:   "Renamed Workspace",
+		TaskID:          taskID,
+		IssueIdentifier: "NEW-6063",
+	})
+	if err != nil {
+		t.Fatalf("resolve root with interrupted owner temp: %v", err)
+	}
+	if resolved != original {
+		t.Fatalf("recoverable root %q was orphaned in favor of %q", original, resolved)
+	}
+	if _, err := os.Stat(tempOwner); err != nil {
+		t.Fatalf("resolution unexpectedly mutated the candidate root: %v", err)
+	}
+}
+
 func TestResolveRootDirConcurrentFirstClaimsChooseOnePhysicalRoot(t *testing.T) {
 	t.Parallel()
 
@@ -213,6 +255,99 @@ func TestResolveRootDirConcurrentFirstClaimsChooseOnePhysicalRoot(t *testing.T) 
 	}
 }
 
+func TestRemoveRootDirRecordKeepsSharedIndexParent(t *testing.T) {
+	t.Parallel()
+
+	params := RootDirParams{
+		WorkspacesRoot: t.TempDir(),
+		WorkspaceID:    "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
+		TaskID:         "5c57b65b-ee7a-4603-a72d-b659c34a1dc3",
+	}
+	envRoot, err := ResolveRootDir(params)
+	if err != nil {
+		t.Fatalf("ResolveRootDir: %v", err)
+	}
+	if err := RemoveRootDirRecord(params.WorkspacesRoot, envRoot, EnvRootOwner{
+		WorkspaceID: params.WorkspaceID,
+		TaskID:      params.TaskID,
+	}); err != nil {
+		t.Fatalf("RemoveRootDirRecord: %v", err)
+	}
+	indexInfo, err := os.Stat(filepath.Join(params.WorkspacesRoot, taskRootIndexDir))
+	if err != nil {
+		t.Fatalf("shared task root index was removed: %v", err)
+	}
+	if !indexInfo.IsDir() {
+		t.Fatal("shared task root index is not a directory")
+	}
+}
+
+func TestPruneTaskRootIndexBoundsAbandonedEntries(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	terminal := RootDirParams{
+		WorkspacesRoot: root,
+		WorkspaceID:    "a05b0e10-ee7a-4603-a72d-a548b2390cb2",
+		TaskID:         "5c57b65b-ee7a-4603-a72d-b659c34a1dc3",
+	}
+	running := terminal
+	running.TaskID = "6d68c76c-ff8b-5704-b83e-c76ad45b2ed4"
+	materialized := terminal
+	materialized.TaskID = "7e79d87d-008c-6805-c94f-d87be56c3fe5"
+	recent := terminal
+	recent.TaskID = "8f8ae98e-119d-7906-da50-e98cf67d40f6"
+	var materializedRoot string
+	for _, params := range []RootDirParams{terminal, running, materialized, recent} {
+		resolved, err := ResolveRootDir(params)
+		if err != nil {
+			t.Fatalf("ResolveRootDir(%s): %v", params.TaskID, err)
+		}
+		if params.TaskID == materialized.TaskID {
+			materializedRoot = resolved
+		}
+	}
+	if err := os.MkdirAll(materializedRoot, 0o755); err != nil {
+		t.Fatalf("materialize protected env root: %v", err)
+	}
+
+	indexDir := filepath.Join(root, taskRootIndexDir)
+	stalePending := filepath.Join(indexDir, taskRootPendingPrefix+"stale")
+	recentPending := filepath.Join(indexDir, taskRootPendingPrefix+"recent")
+	for _, dir := range []string{stalePending, recentPending} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("seed pending entry: %v", err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-2 * taskRootIndexMinPruneAge)
+	for _, dir := range []string{taskRootRecordDir(terminal), taskRootRecordDir(running), taskRootRecordDir(materialized), stalePending} {
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatalf("age index entry %s: %v", dir, err)
+		}
+	}
+
+	removed, err := PruneTaskRootIndex(root, 0, now, func(_, taskID string) bool {
+		return taskID == terminal.TaskID || taskID == materialized.TaskID || taskID == recent.TaskID
+	})
+	if err != nil {
+		t.Fatalf("PruneTaskRootIndex: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want terminal record plus stale pending entry", removed)
+	}
+	for _, removedPath := range []string{taskRootRecordDir(terminal), stalePending} {
+		if _, err := os.Stat(removedPath); !os.IsNotExist(err) {
+			t.Fatalf("stale entry %s still exists: %v", removedPath, err)
+		}
+	}
+	for _, keptPath := range []string{taskRootRecordDir(running), taskRootRecordDir(materialized), taskRootRecordDir(recent), recentPending} {
+		if _, err := os.Stat(keptPath); err != nil {
+			t.Fatalf("protected entry %s was removed: %v", keptPath, err)
+		}
+	}
+}
+
 func TestResolveRootDirRejectsRecordOutsideStableIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -232,6 +367,8 @@ func TestResolveRootDirRejectsRecordOutsideStableIdentity(t *testing.T) {
 		t.Fatal("ResolveRootDir accepted a record outside the task's stable identity")
 	} else if !strings.Contains(err.Error(), "does not match its stable identity") {
 		t.Fatalf("error = %v, want stable identity rejection", err)
+	} else if !strings.Contains(err.Error(), taskRootRecordDir(params)) {
+		t.Fatalf("error = %v, want actionable record directory", err)
 	}
 }
 

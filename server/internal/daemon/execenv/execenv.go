@@ -1638,5 +1638,6 @@ func envRootHoldsWork(envRoot string) (bool, error) {
 }
 
 func isEnvRootBookkeeping(name string) bool {
-	return name == envRootOwnerFile || name == envRootLockFile
+	return name == envRootOwnerFile || name == envRootLockFile ||
+		(strings.HasPrefix(name, envRootOwnerTempPrefix) && strings.HasSuffix(name, envRootOwnerTempSuffix))
 }
