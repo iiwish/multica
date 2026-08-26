@@ -1283,11 +1283,21 @@ func TestBatchIssueGCCheck_ReportsCurrentResumeCandidate(t *testing.T) {
 		"work_dir":     "/tmp/multica-current/workdir",
 		"completed_at": testutil.Raw("now() - interval '1 hour'"),
 	})
+	localIssueID := dbfx.Issue(t, "disk usage finalized local worktree issue")
+	localWorktreeTaskID := dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id":         localIssueID,
+		"runtime_id":       runtimeID,
+		"status":           "completed",
+		"session_id":       uuid.NewString(),
+		"work_dir":         "/tmp/multica-local-worktree/worktree",
+		"durable_work_dir": "/tmp/multica-user-project",
+		"completed_at":     testutil.Raw("now() - interval '30 minutes'"),
+	})
 	missingTaskID := "00000000-0000-0000-0000-000000000099"
 
 	req := newDaemonTokenRequest("POST", "/api/daemon/workspaces/"+testWorkspaceID+"/issues/gc-check", map[string]any{
-		"issue_ids": []string{issueID},
-		"task_ids":  []string{olderTaskID, currentTaskID, missingTaskID},
+		"issue_ids": []string{issueID, localIssueID},
+		"task_ids":  []string{olderTaskID, currentTaskID, localWorktreeTaskID, missingTaskID},
 	}, testWorkspaceID, "legit-daemon")
 	req = withURLParam(req, "workspaceId", testWorkspaceID)
 	w := testutil.Call(t, testHandler.BatchIssueGCCheck, req).Want(http.StatusOK)
@@ -1300,16 +1310,17 @@ func TestBatchIssueGCCheck_ReportsCurrentResumeCandidate(t *testing.T) {
 		} `json:"task_environments"`
 	}
 	w.JSON(&resp)
-	if len(resp.TaskEnvironments) != 3 {
-		t.Fatalf("task_environments length = %d, want 3: %s", len(resp.TaskEnvironments), w.Body.String())
+	if len(resp.TaskEnvironments) != 4 {
+		t.Fatalf("task_environments length = %d, want 4: %s", len(resp.TaskEnvironments), w.Body.String())
 	}
 	want := map[string]struct {
 		found     bool
 		candidate bool
 	}{
-		olderTaskID:   {found: true, candidate: false},
-		currentTaskID: {found: true, candidate: true},
-		missingTaskID: {found: false, candidate: false},
+		olderTaskID:         {found: true, candidate: false},
+		currentTaskID:       {found: true, candidate: true},
+		localWorktreeTaskID: {found: true, candidate: false},
+		missingTaskID:       {found: false, candidate: false},
 	}
 	for _, item := range resp.TaskEnvironments {
 		expected, ok := want[item.TaskID]

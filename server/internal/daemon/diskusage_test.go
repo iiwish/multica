@@ -104,9 +104,12 @@ func TestScanDiskUsage_AggregatesAndCategorizes(t *testing.T) {
 	if a1.WorkspaceShort != ShortID(wsA) {
 		t.Errorf("task a1 workspace_short = %q, want %q", a1.WorkspaceShort, ShortID(wsA))
 	}
-	if a1.TaskID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" || a1.CompletedAt == nil || !a1.LocalDirectory {
+	if a1.TaskID != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" || a1.CompletedAt == nil || a1.LocalDirectory == nil || !*a1.LocalDirectory {
 		t.Errorf("task a1 lifecycle metadata = task_id:%q completed_at:%v local_directory:%v",
 			a1.TaskID, a1.CompletedAt, a1.LocalDirectory)
+	}
+	if a1.ResumeCandidate == nil || *a1.ResumeCandidate {
+		t.Errorf("local_directory resume_candidate = %v, want false", a1.ResumeCandidate)
 	}
 
 	a2 := byShort["bbbbbbbb"]
@@ -119,6 +122,9 @@ func TestScanDiskUsage_AggregatesAndCategorizes(t *testing.T) {
 	if a2.ArtifactSizeBytes != 0 {
 		t.Errorf("task a2 artifact size = %d, want 0", a2.ArtifactSizeBytes)
 	}
+	if a2.LocalDirectory == nil || *a2.LocalDirectory {
+		t.Errorf("managed task local_directory = %v, want false", a2.LocalDirectory)
+	}
 
 	b1 := byShort["cccccccc"]
 	if b1.Kind != DiskUsageKindUnknown {
@@ -129,6 +135,9 @@ func TestScanDiskUsage_AggregatesAndCategorizes(t *testing.T) {
 	}
 	if b1.AgeSeconds < 60 {
 		t.Errorf("task b1 age_seconds = %d, want >= 60 (mtime backdated 2h)", b1.AgeSeconds)
+	}
+	if b1.LocalDirectory != nil {
+		t.Errorf("metadata-free task local_directory = %v, want unknown", b1.LocalDirectory)
 	}
 
 	if report.TotalSizeBytes != a1.SizeBytes+a2.SizeBytes+b1.SizeBytes {
@@ -307,6 +316,12 @@ func TestScanDiskUsage_ReadableActiveRootUsesOwnerIdentityWithoutGCMeta(t *testi
 	wantTaskSegment := filepath.Base(env.RootDir)
 	if usage.TaskShort != wantTaskSegment {
 		t.Fatalf("task_short = %q, want physical directory segment %q", usage.TaskShort, wantTaskSegment)
+	}
+	if usage.TaskID != taskID {
+		t.Fatalf("task_id = %q, want owner identity %q", usage.TaskID, taskID)
+	}
+	if usage.LocalDirectory != nil {
+		t.Fatalf("local_directory = %v, want unknown without completion metadata", usage.LocalDirectory)
 	}
 	if len(report.Workspaces) != 1 || report.Workspaces[0].WorkspaceID != workspaceID {
 		t.Fatalf("workspace aggregate = %+v, want authoritative workspace %q", report.Workspaces, workspaceID)
@@ -790,6 +805,26 @@ func TestResolveParentStatuses_NoFetcherIsNoOp(t *testing.T) {
 	}
 }
 
+func TestResolveParentStatuses_MissingManagedWorkDirCannotResume(t *testing.T) {
+	t.Parallel()
+
+	task := issueTask("11111111-1111-1111-1111-111111111111", "aaaa1111", "issue-1")
+	task.managedWorkDirSeen = boolPointer(false)
+	report := &DiskUsageReport{Tasks: []TaskDiskUsage{task}}
+	fetch := func(_ context.Context, _ string, issueIDs, taskIDs []string) (map[string]IssueGCCheckResult, map[string]TaskEnvironmentGCCheckResult, error) {
+		return foundIssueResults(map[string]string{issueIDs[0]: "todo"}), map[string]TaskEnvironmentGCCheckResult{
+			taskIDs[0]: {TaskID: taskIDs[0], Found: true, ResumeCandidate: true},
+		}, nil
+	}
+
+	if err := ResolveParentStatuses(context.Background(), report, fetch); err != nil {
+		t.Fatalf("ResolveParentStatuses: %v", err)
+	}
+	if got := report.Tasks[0].ResumeCandidate; got == nil || *got {
+		t.Fatalf("resume_candidate = %v, want false when the managed workdir is gone", got)
+	}
+}
+
 func TestApplyDiskUsageRetentionPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -826,7 +861,7 @@ func TestApplyDiskUsageRetentionPolicy(t *testing.T) {
 		},
 		{
 			name:       "local directory is never fully removed",
-			task:       TaskDiskUsage{Kind: string(execenv.GCKindIssue), ParentID: "issue", LocalDirectory: true},
+			task:       TaskDiskUsage{Kind: string(execenv.GCKindIssue), ParentID: "issue", LocalDirectory: boolPointer(true)},
 			policy:     nil,
 			wantReason: RetentionLocalDirectory,
 		},
@@ -894,6 +929,9 @@ func TestApplyDiskUsageRetentionPolicy(t *testing.T) {
 			if got.RetentionReason != tc.wantReason {
 				t.Errorf("retention_reason = %q, want %q", got.RetentionReason, tc.wantReason)
 			}
+			if tc.wantReason == RetentionLocalDirectory && (got.ResumeCandidate == nil || *got.ResumeCandidate) {
+				t.Errorf("local_directory resume_candidate = %v, want false", got.ResumeCandidate)
+			}
 			if tc.wantCleanupAt == nil {
 				if got.EstimatedCleanupAt != nil {
 					t.Errorf("estimated_cleanup_at = %s, want nil", got.EstimatedCleanupAt)
@@ -906,6 +944,10 @@ func TestApplyDiskUsageRetentionPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 // TestScanDiskUsage_ReportsRepoCacheSeparately pins the accounting split: the

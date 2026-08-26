@@ -79,9 +79,10 @@ WHERE workspace_id = sqlc.arg('workspace_id')
 
 -- name: ListIssueTaskEnvironmentSubjects :many
 -- Resolve task ids supplied by a local daemon diagnostic to their trusted
--- (agent, issue, work_dir) scope. The workspace join is the authorization
--- boundary: callers cannot use a task id to inspect another workspace.
-SELECT t.id, t.agent_id, t.issue_id, t.work_dir
+-- (agent, issue, work_dir, durable_work_dir) scope. The workspace join is the
+-- authorization boundary: callers cannot use a task id to inspect another
+-- workspace.
+SELECT t.id, t.agent_id, t.issue_id, t.work_dir, t.durable_work_dir
 FROM agent_task_queue t
 JOIN issue i ON i.id = t.issue_id
 WHERE i.workspace_id = sqlc.arg('workspace_id')

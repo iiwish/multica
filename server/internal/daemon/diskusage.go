@@ -30,7 +30,7 @@ type TaskDiskUsage struct {
 	ParentStatus       string     `json:"parent_status"`
 	ParentUpdatedAt    *time.Time `json:"parent_updated_at,omitempty"`
 	CompletedAt        *time.Time `json:"completed_at,omitempty"`
-	LocalDirectory     bool       `json:"local_directory"`
+	LocalDirectory     *bool      `json:"local_directory"`
 	ResumeCandidate    *bool      `json:"resume_candidate"`
 	RetentionReason    string     `json:"retention_reason"`
 	EstimatedCleanupAt *time.Time `json:"estimated_cleanup_at,omitempty"`
@@ -40,6 +40,7 @@ type TaskDiskUsage struct {
 	parentFound        *bool
 	orphanAgeSeconds   int64
 	orphanAgeKnown     bool
+	managedWorkDirSeen *bool
 }
 
 // GCPolicySnapshot is the non-secret portion of the running daemon's effective
@@ -339,6 +340,11 @@ func buildTaskUsage(taskDir, wsID, taskShort string, matcher artifactMatcher) Ta
 		usage.orphanAgeSeconds = int64(time.Since(info.ModTime()).Seconds())
 		usage.orphanAgeKnown = true
 	}
+	managedWorkDirSeen := false
+	if info, err := os.Lstat(filepath.Join(taskDir, "workdir")); err == nil && info.IsDir() {
+		managedWorkDirSeen = true
+	}
+	usage.managedWorkDirSeen = &managedWorkDirSeen
 
 	metaPresent := false
 	if provenance, err := execenv.ReadManagedEnvProvenance(taskDir); err == nil && provenance != nil {
@@ -352,6 +358,9 @@ func buildTaskUsage(taskDir, wsID, taskShort string, matcher artifactMatcher) Ta
 			usage.WorkspaceID = workspaceID
 			usage.WorkspaceShort = ShortID(workspaceID)
 		}
+		if taskID := strings.TrimSpace(owner.TaskID); taskID != "" {
+			usage.TaskID = taskID
+		}
 	}
 	if meta, err := execenv.ReadGCMeta(taskDir); err == nil && meta != nil {
 		metaPresent = true
@@ -360,9 +369,19 @@ func buildTaskUsage(taskDir, wsID, taskShort string, matcher artifactMatcher) Ta
 			usage.WorkspaceShort = ShortID(workspaceID)
 		}
 		usage.Kind = string(meta.Kind)
-		usage.TaskID = strings.TrimSpace(meta.TaskID)
+		if taskID := strings.TrimSpace(meta.TaskID); taskID != "" {
+			usage.TaskID = taskID
+		}
 		usage.ParentID = parentIDForMeta(meta)
-		usage.LocalDirectory = meta.LocalDirectory
+		localDirectory := meta.LocalDirectory
+		usage.LocalDirectory = &localDirectory
+		if localDirectory {
+			// A local_directory task root is never the managed environment reused
+			// by a follow-up. The project path may be used again, but the daemon
+			// deliberately provisions a fresh env root around it.
+			resumeCandidate := false
+			usage.ResumeCandidate = &resumeCandidate
+		}
 		if !meta.CompletedAt.IsZero() {
 			completedAt := meta.CompletedAt.UTC()
 			usage.CompletedAt = &completedAt
@@ -431,7 +450,7 @@ func ResolveParentStatuses(ctx context.Context, report *DiskUsageReport, fetch P
 		if task.Kind != string(execenv.GCKindIssue) || task.ParentID == "" {
 			continue
 		}
-		if task.TaskID != "" {
+		if task.TaskID != "" && (task.LocalDirectory == nil || !*task.LocalDirectory) {
 			taskIDsByWorkspace[task.WorkspaceID] = append(taskIDsByWorkspace[task.WorkspaceID], task.TaskID)
 		}
 		if seen[task.WorkspaceID] == nil {
@@ -500,6 +519,12 @@ func ResolveParentStatuses(ctx context.Context, report *DiskUsageReport, fetch P
 		}
 		if candidate, ok := resumeCandidates[task.WorkspaceID][task.TaskID]; ok && candidate.Found {
 			value := candidate.ResumeCandidate
+			// The server identifies the canonical prior_work_dir row, while the
+			// local scan can prove that the standard managed workdir is already
+			// gone. Both must agree before calling an environment resumable.
+			if value && task.managedWorkDirSeen != nil && !*task.managedWorkDirSeen {
+				value = false
+			}
 			task.ResumeCandidate = &value
 		}
 	}
@@ -535,7 +560,9 @@ func ApplyDiskUsageRetentionPolicy(report *DiskUsageReport, policy *GCPolicySnap
 		task.RetentionReason = RetentionKindPolicyUnavailable
 		task.EstimatedCleanupAt = nil
 
-		if task.LocalDirectory {
+		if task.LocalDirectory != nil && *task.LocalDirectory {
+			resumeCandidate := false
+			task.ResumeCandidate = &resumeCandidate
 			task.RetentionReason = RetentionLocalDirectory
 			continue
 		}

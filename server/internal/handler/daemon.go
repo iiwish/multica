@@ -5068,8 +5068,12 @@ func (h *Handler) BatchIssueGCCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(req.IssueIDs) > maxIssueGCBatchSize || len(req.TaskIDs) > maxIssueGCBatchSize {
-		writeError(w, http.StatusBadRequest, "too many ids")
+	if len(req.IssueIDs) > maxIssueGCBatchSize {
+		writeError(w, http.StatusBadRequest, "too many issue_ids")
+		return
+	}
+	if len(req.TaskIDs) > maxIssueGCBatchSize {
+		writeError(w, http.StatusBadRequest, "too many task_ids")
 		return
 	}
 
@@ -5187,7 +5191,12 @@ func (h *Handler) BatchIssueGCCheck(w http.ResponseWriter, r *http.Request) {
 			item := batchIssueTaskEnvironmentItem{TaskID: taskID, Found: found}
 			if found {
 				scopeKey := uuidToString(subject.AgentID) + "/" + uuidToString(subject.IssueID)
-				item.ResumeCandidate = subject.WorkDir.Valid && subject.WorkDir.String != "" &&
+				// A durable_work_dir means this task ran in a disposable
+				// local_directory worktree that was finalized and removed. The
+				// server may still select its session/work_dir row, but the daemon
+				// deliberately starts the next local task with a fresh env root.
+				item.ResumeCandidate = !subject.DurableWorkDir.Valid &&
+					subject.WorkDir.Valid && subject.WorkDir.String != "" &&
 					subject.WorkDir.String == workdirByScope[scopeKey]
 			}
 			environments = append(environments, item)

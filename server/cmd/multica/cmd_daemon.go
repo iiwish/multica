@@ -2121,7 +2121,7 @@ func printDiskUsageTaskTable(w io.Writer, report daemon.DiskUsageReport) {
 			task.WorkspaceShort + "/" + task.TaskShort,
 			task.Kind,
 			emptyDash(task.ParentStatus),
-			formatOptionalBool(task.LocalDirectory, true),
+			formatOptionalBool(task.LocalDirectory),
 			formatResumeCandidate(task.ResumeCandidate),
 			emptyDash(task.RetentionReason),
 			formatEstimatedCleanup(task.EstimatedCleanupAt),
@@ -2150,21 +2150,18 @@ func printDiskUsageTaskTable(w io.Writer, report daemon.DiskUsageReport) {
 	printDiskUsagePolicyHint(w, report)
 }
 
-func formatOptionalBool(value, known bool) string {
-	if !known {
+func formatOptionalBool(value *bool) string {
+	if value == nil {
 		return "-"
 	}
-	if value {
+	if *value {
 		return "yes"
 	}
 	return "no"
 }
 
 func formatResumeCandidate(value *bool) string {
-	if value == nil {
-		return "-"
-	}
-	return formatOptionalBool(*value, true)
+	return formatOptionalBool(value)
 }
 
 func formatEstimatedCleanup(value *time.Time) string {

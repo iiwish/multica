@@ -1012,7 +1012,7 @@ func (q *Queries) ListIssueGCStatuses(ctx context.Context, arg ListIssueGCStatus
 }
 
 const listIssueTaskEnvironmentSubjects = `-- name: ListIssueTaskEnvironmentSubjects :many
-SELECT t.id, t.agent_id, t.issue_id, t.work_dir
+SELECT t.id, t.agent_id, t.issue_id, t.work_dir, t.durable_work_dir
 FROM agent_task_queue t
 JOIN issue i ON i.id = t.issue_id
 WHERE i.workspace_id = $1
@@ -1025,15 +1025,17 @@ type ListIssueTaskEnvironmentSubjectsParams struct {
 }
 
 type ListIssueTaskEnvironmentSubjectsRow struct {
-	ID      pgtype.UUID `json:"id"`
-	AgentID pgtype.UUID `json:"agent_id"`
-	IssueID pgtype.UUID `json:"issue_id"`
-	WorkDir pgtype.Text `json:"work_dir"`
+	ID             pgtype.UUID `json:"id"`
+	AgentID        pgtype.UUID `json:"agent_id"`
+	IssueID        pgtype.UUID `json:"issue_id"`
+	WorkDir        pgtype.Text `json:"work_dir"`
+	DurableWorkDir pgtype.Text `json:"durable_work_dir"`
 }
 
 // Resolve task ids supplied by a local daemon diagnostic to their trusted
-// (agent, issue, work_dir) scope. The workspace join is the authorization
-// boundary: callers cannot use a task id to inspect another workspace.
+// (agent, issue, work_dir, durable_work_dir) scope. The workspace join is the
+// authorization boundary: callers cannot use a task id to inspect another
+// workspace.
 func (q *Queries) ListIssueTaskEnvironmentSubjects(ctx context.Context, arg ListIssueTaskEnvironmentSubjectsParams) ([]ListIssueTaskEnvironmentSubjectsRow, error) {
 	rows, err := q.db.Query(ctx, listIssueTaskEnvironmentSubjects, arg.WorkspaceID, arg.TaskIds)
 	if err != nil {
@@ -1048,6 +1050,7 @@ func (q *Queries) ListIssueTaskEnvironmentSubjects(ctx context.Context, arg List
 			&i.AgentID,
 			&i.IssueID,
 			&i.WorkDir,
+			&i.DurableWorkDir,
 		); err != nil {
 			return nil, err
 		}
