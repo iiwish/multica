@@ -5133,10 +5133,9 @@ func (h *Handler) BatchIssueGCCheck(w http.ResponseWriter, r *http.Request) {
 	// Resume-candidate inspection is intentionally opt-in. `disk-usage` sends
 	// the task ids found in local GC metadata; the normal daemon GC request does
 	// not, so this cannot add point queries to the periodic cleanup loop.
-	// Resolve ownership in one workspace-scoped query, then run the canonical
-	// GetLastTaskSession selection once per distinct (agent, issue) pair. That
-	// query owns the poison/retired-session rules used by claim, avoiding a
-	// second approximation that could label a dead workdir resumable.
+	// Resolve ownership and the canonical resumable workdir for every distinct
+	// (agent, issue) scope in one set-based query. Keeping the database call
+	// count constant matters because this endpoint accepts up to 500 task ids.
 	environments := make([]batchIssueTaskEnvironmentItem, 0, len(req.TaskIDs))
 	if len(req.TaskIDs) > 0 {
 		parsedTaskIDs := make([]pgtype.UUID, 0, len(req.TaskIDs))
@@ -5162,42 +5161,23 @@ func (h *Handler) BatchIssueGCCheck(w http.ResponseWriter, r *http.Request) {
 		}
 
 		subjects := make(map[string]db.ListIssueTaskEnvironmentSubjectsRow, len(subjectRows))
-		workdirByScope := make(map[string]string)
 		for _, subject := range subjectRows {
 			taskID := uuidToString(subject.ID)
 			subjects[taskID] = subject
-			scopeKey := uuidToString(subject.AgentID) + "/" + uuidToString(subject.IssueID)
-			if _, seen := workdirByScope[scopeKey]; seen {
-				continue
-			}
-			prior, priorErr := h.Queries.GetLastTaskSession(r.Context(), db.GetLastTaskSessionParams{
-				AgentID: subject.AgentID,
-				IssueID: subject.IssueID,
-			})
-			switch {
-			case priorErr == nil && prior.WorkDir.Valid:
-				workdirByScope[scopeKey] = prior.WorkDir.String
-			case priorErr == nil || errors.Is(priorErr, pgx.ErrNoRows):
-				workdirByScope[scopeKey] = ""
-			default:
-				slog.Warn("resolve issue task resume candidate failed", "workspace_id", workspaceID, "error", priorErr)
-				writeError(w, http.StatusInternalServerError, "failed to inspect task environments")
-				return
-			}
 		}
 
 		for _, taskID := range canonicalTaskIDs {
 			subject, found := subjects[taskID]
 			item := batchIssueTaskEnvironmentItem{TaskID: taskID, Found: found}
 			if found {
-				scopeKey := uuidToString(subject.AgentID) + "/" + uuidToString(subject.IssueID)
 				// A durable_work_dir means this task ran in a disposable
 				// local_directory worktree that was finalized and removed. The
 				// server may still select its session/work_dir row, but the daemon
 				// deliberately starts the next local task with a fresh env root.
 				item.ResumeCandidate = !subject.DurableWorkDir.Valid &&
 					subject.WorkDir.Valid && subject.WorkDir.String != "" &&
-					subject.WorkDir.String == workdirByScope[scopeKey]
+					subject.CanonicalWorkDir.Valid &&
+					subject.WorkDir.String == subject.CanonicalWorkDir.String
 			}
 			environments = append(environments, item)
 		}

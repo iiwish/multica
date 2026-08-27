@@ -184,6 +184,7 @@ func TestDiskUsageGCPolicyUsesRunningDaemonEffectiveConfig(t *testing.T) {
 	t.Setenv("MULTICA_AGENT_ID", "agent-test")
 	t.Setenv("MULTICA_TASK_ID", "task-test")
 	t.Setenv("MULTICA_GC_TTL", "1s") // Must not leak into the reported policy.
+	workspacesRoot := filepath.Join(t.TempDir(), "daemon-workspaces")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/health" {
@@ -191,7 +192,8 @@ func TestDiskUsageGCPolicyUsesRunningDaemonEffectiveConfig(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "running",
+			"status":          "running",
+			"workspaces_root": workspacesRoot,
 			"gc_policy": map[string]any{
 				"enabled":                    true,
 				"ttl_seconds":                259200,
@@ -205,13 +207,94 @@ func TestDiskUsageGCPolicyUsesRunningDaemonEffectiveConfig(t *testing.T) {
 	port := srv.Listener.Addr().(*net.TCPAddr).Port
 	t.Setenv("MULTICA_DAEMON_PORT", strconv.Itoa(port))
 
-	got := diskUsageGCPolicy(newDiskUsageTestCmd(t), "", true)
+	got := diskUsageGCPolicy(newDiskUsageTestCmd(t), "", true, workspacesRoot)
 	if got == nil {
 		t.Fatal("diskUsageGCPolicy returned nil for a running daemon")
 	}
 	if got.TTLSeconds != 259200 || got.CompletedTaskTTLSeconds != 1209600 || got.OrphanTTLSeconds != 604800 || got.ArtifactTTLSeconds != 43200 {
 		t.Fatalf("effective policy = %+v", got)
 	}
+}
+
+func TestDiskUsageGCPolicyRejectsWorkspacesRootDrift(t *testing.T) {
+	pinHumanCLIContext(t)
+	home := t.TempDir()
+	daemonRoot := filepath.Join(t.TempDir(), "daemon-workspaces")
+	t.Setenv("HOME", home)
+
+	var profile string
+	var listener net.Listener
+	for i := 0; i < 1000; i++ {
+		profile = "root-drift-" + strconv.Itoa(i)
+		candidate, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(healthPortForProfile(profile)))
+		if err == nil {
+			listener = candidate
+			break
+		}
+	}
+	if listener == nil {
+		t.Fatal("could not reserve a named-profile health port")
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":          "running",
+			"profile":         profile,
+			"workspaces_root": daemonRoot,
+			"gc_policy": map[string]any{
+				"enabled":                    true,
+				"ttl_seconds":                86400,
+				"completed_task_ttl_seconds": 1209600,
+				"orphan_ttl_seconds":         259200,
+				"artifact_ttl_seconds":       43200,
+			},
+		})
+	}))
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
+
+	assertUnavailable := func(t *testing.T, scannedRoot string) {
+		t.Helper()
+		if got := diskUsageGCPolicy(newDiskUsageTestCmd(t), profile, false, scannedRoot); got != nil {
+			t.Fatalf("policy = %+v, want unavailable for scanned root %q owned by a different daemon root", got, scannedRoot)
+		}
+	}
+
+	t.Run("process environment overrides the daemon root", func(t *testing.T) {
+		envRoot := filepath.Join(t.TempDir(), "environment-workspaces")
+		t.Setenv("MULTICA_WORKSPACES_ROOT", envRoot)
+		root, err := resolveDiskUsageRoot(false, profile, "")
+		if err != nil {
+			t.Fatalf("resolve environment root: %v", err)
+		}
+		if root != envRoot {
+			t.Fatalf("resolved root = %q, want environment root %q", root, envRoot)
+		}
+		assertUnavailable(t, root)
+	})
+
+	t.Run("profile configuration changes after daemon startup", func(t *testing.T) {
+		t.Setenv("MULTICA_WORKSPACES_ROOT", "")
+		if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{WorkspacesRoot: daemonRoot}, profile); err != nil {
+			t.Fatalf("save daemon startup profile root: %v", err)
+		}
+		changedRoot := filepath.Join(t.TempDir(), "changed-profile-workspaces")
+		if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{WorkspacesRoot: changedRoot}, profile); err != nil {
+			t.Fatalf("save changed profile root: %v", err)
+		}
+		root, err := resolveDiskUsageRoot(false, profile, "")
+		if err != nil {
+			t.Fatalf("resolve changed profile root: %v", err)
+		}
+		if root != changedRoot {
+			t.Fatalf("resolved root = %q, want changed profile root %q", root, changedRoot)
+		}
+		assertUnavailable(t, root)
+	})
 }
 
 // TestRunDaemonDiskUsageByWorkspaceTableMakesNoRequest is the offline-regression

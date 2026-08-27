@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ func TestHealthHandlerReportsCLIVersionAndTaskCounts(t *testing.T) {
 			GCCompletedTaskTTL: 14 * 24 * time.Hour,
 			GCOrphanTTL:        7 * 24 * time.Hour,
 			GCArtifactTTL:      12 * time.Hour,
+			WorkspacesRoot:     filepath.Join("relative", "..", "daemon-workspaces"),
 		},
 		workspaces: map[string]*workspaceState{},
 		logger:     slog.Default(),
@@ -74,6 +76,13 @@ func TestHealthHandlerReportsCLIVersionAndTaskCounts(t *testing.T) {
 	if got, want := raw["status"], "running"; got != want {
 		t.Errorf("status key: got %v, want %q", got, want)
 	}
+	wantRoot, err := filepath.Abs("daemon-workspaces")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := raw["workspaces_root"]; got != wantRoot {
+		t.Errorf("workspaces_root key: got %v, want %q", got, wantRoot)
+	}
 	// The desktop relies on the `os` key (runtime.GOOS) to detect a daemon it
 	// can't manage (e.g. Linux-in-WSL behind a Windows desktop). A rename or
 	// drop would silently re-break #3916, so lock both the key and its value.
@@ -113,6 +122,9 @@ func TestHealthHandlerReportsCLIVersionAndTaskCounts(t *testing.T) {
 	}
 	if resp.ResourceWaitTaskCount != 1 {
 		t.Errorf("ResourceWaitTaskCount: got %d, want 1", resp.ResourceWaitTaskCount)
+	}
+	if resp.WorkspacesRoot != wantRoot {
+		t.Errorf("WorkspacesRoot: got %q, want %q", resp.WorkspacesRoot, wantRoot)
 	}
 }
 

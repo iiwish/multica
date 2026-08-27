@@ -1806,7 +1806,7 @@ func runDaemonDiskUsage(cmd *cobra.Command, _ []string) error {
 		fillDiskUsageParentStatuses(cmd, profile, &report)
 	}
 	if rootOverride == "" {
-		daemon.ApplyDiskUsageRetentionPolicy(&report, diskUsageGCPolicy(cmd, profile, taskContext), time.Now())
+		daemon.ApplyDiskUsageRetentionPolicy(&report, diskUsageGCPolicy(cmd, profile, taskContext, workspacesRoot), time.Now())
 	} else {
 		daemon.ApplyDiskUsageRetentionPolicy(&report, nil, time.Now())
 	}
@@ -1942,7 +1942,7 @@ func newParentStatusFetcher(cmd *cobra.Command, profile string) daemon.ParentSta
 // guess: Desktop and background shells commonly launch the daemon with a
 // different environment. A stopped/older/mismatched daemon therefore yields
 // nil and estimates stay explicitly unavailable.
-func diskUsageGCPolicy(cmd *cobra.Command, profile string, taskContext bool) *daemon.GCPolicySnapshot {
+func diskUsageGCPolicy(cmd *cobra.Command, profile string, taskContext bool, workspacesRoot string) *daemon.GCPolicySnapshot {
 	port := healthPortForProfile(profile)
 	if taskContext {
 		resolved, err := daemonStatusHealthPort(cmd)
@@ -1962,6 +1962,10 @@ func diskUsageGCPolicy(cmd *cobra.Command, profile string, taskContext bool) *da
 		return nil
 	}
 	if !taskContext && daemonIdentityMismatch(health, profile, port) != nil {
+		return nil
+	}
+	daemonRoot, ok := health["workspaces_root"].(string)
+	if !ok || !samePath(daemonRoot, workspacesRoot) {
 		return nil
 	}
 	raw, ok := health["gc_policy"]
@@ -2003,7 +2007,7 @@ func runDaemonDiskUsageAggregate(cmd *cobra.Command, byWorkspace bool, top int, 
 	}
 	for i := range agg.Roots {
 		report := &agg.Roots[i].Report
-		daemon.ApplyDiskUsageRetentionPolicy(report, diskUsageGCPolicy(cmd, agg.Roots[i].Profile, false), time.Now())
+		daemon.ApplyDiskUsageRetentionPolicy(report, diskUsageGCPolicy(cmd, agg.Roots[i].Profile, false, report.WorkspacesRoot), time.Now())
 	}
 
 	// --top trims each root's table independently — the grand total in the
