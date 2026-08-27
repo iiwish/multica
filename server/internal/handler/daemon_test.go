@@ -1344,11 +1344,12 @@ func TestListIssueTaskEnvironmentSubjectsMatchesCanonicalSessionSelection(t *tes
 	runtimeID := handlerTestRuntimeID(t)
 	agentID := dbfx.Agent(t, "bulk resume equivalence agent", runtimeID)
 	type scope struct {
-		name   string
-		issue  string
-		taskID string
+		name        string
+		issue       string
+		taskID      string
+		wantWorkDir string
 	}
-	scopes := make([]scope, 0, 4)
+	scopes := make([]scope, 0, 24)
 
 	healthyIssue := dbfx.Issue(t, "bulk resume equivalence healthy")
 	dbfx.Task(t, agentID, testutil.Cols{
@@ -1361,7 +1362,7 @@ func TestListIssueTaskEnvironmentSubjectsMatchesCanonicalSessionSelection(t *tes
 		"session_id": "healthy-current", "work_dir": "/tmp/equivalence-healthy-current/workdir",
 		"completed_at": testutil.Raw("now() - interval '1 hour'"),
 	})
-	scopes = append(scopes, scope{"healthy latest session", healthyIssue, healthyTask})
+	scopes = append(scopes, scope{"healthy latest session", healthyIssue, healthyTask, "/tmp/equivalence-healthy-current/workdir"})
 
 	poisonIssue := dbfx.Issue(t, "bulk resume equivalence poisoned")
 	poisonFallback := dbfx.Task(t, agentID, testutil.Cols{
@@ -1380,7 +1381,7 @@ func TestListIssueTaskEnvironmentSubjectsMatchesCanonicalSessionSelection(t *tes
 		"failure_reason": "api_invalid_request", "error": "400 invalid_request_error",
 		"completed_at": testutil.Raw("now() - interval '1 hour'"),
 	})
-	scopes = append(scopes, scope{"poisoned latest state", poisonIssue, poisonFallback})
+	scopes = append(scopes, scope{"poisoned latest state", poisonIssue, poisonFallback, "/tmp/equivalence-poison-fallback/workdir"})
 
 	retiredIssue := dbfx.Issue(t, "bulk resume equivalence retired")
 	retiredFallback := dbfx.Task(t, agentID, testutil.Cols{
@@ -1398,7 +1399,7 @@ func TestListIssueTaskEnvironmentSubjectsMatchesCanonicalSessionSelection(t *tes
 		"session_id": nil, "retired_session_id": "explicitly-retired",
 		"completed_at": testutil.Raw("now() - interval '1 hour'"),
 	})
-	scopes = append(scopes, scope{"explicitly retired session", retiredIssue, retiredFallback})
+	scopes = append(scopes, scope{"explicitly retired session", retiredIssue, retiredFallback, "/tmp/equivalence-retired-fallback/workdir"})
 
 	overflowIssue := dbfx.Issue(t, "bulk resume equivalence overflow")
 	overflowTask := dbfx.Task(t, agentID, testutil.Cols{
@@ -1412,7 +1413,127 @@ func TestListIssueTaskEnvironmentSubjectsMatchesCanonicalSessionSelection(t *tes
 		"error":        "thread/resume failed: token too long",
 		"completed_at": testutil.Raw("now() - interval '1 hour'"),
 	})
-	scopes = append(scopes, scope{"resume overflow cutoff", overflowIssue, overflowTask})
+	scopes = append(scopes, scope{"resume overflow cutoff", overflowIssue, overflowTask, ""})
+
+	unsafeReasons := []string{
+		"iteration_limit",
+		"agent_fallback_message",
+		"api_invalid_request",
+		"codex_semantic_inactivity",
+		"agent_error.context_overflow",
+		"codex_resume_oversized",
+	}
+	for i, reason := range unsafeReasons {
+		issueID := dbfx.Issue(t, "bulk resume equivalence reason "+reason)
+		fallbackDir := fmt.Sprintf("/tmp/equivalence-reason-%d-fallback/workdir", i)
+		fallbackTask := dbfx.Task(t, agentID, testutil.Cols{
+			"issue_id": issueID, "runtime_id": runtimeID, "status": "completed",
+			"session_id": fmt.Sprintf("reason-%d-fallback", i), "work_dir": fallbackDir,
+			"completed_at": testutil.Raw("now() - interval '3 hours'"),
+		})
+		dbfx.Task(t, agentID, testutil.Cols{
+			"issue_id": issueID, "runtime_id": runtimeID, "status": "failed",
+			"session_id":     fmt.Sprintf("reason-%d-poisoned", i),
+			"work_dir":       fmt.Sprintf("/tmp/equivalence-reason-%d-poisoned/workdir", i),
+			"failure_reason": reason,
+			"completed_at":   testutil.Raw("now() - interval '1 hour'"),
+		})
+		wantWorkDir := fallbackDir
+		if reason == "codex_resume_oversized" {
+			// This reason also establishes the scope-wide time cutoff, so every
+			// older session is ineligible even when it is otherwise healthy.
+			wantWorkDir = ""
+		}
+		scopes = append(scopes, scope{"unsafe reason " + reason, issueID, fallbackTask, wantWorkDir})
+	}
+
+	textCases := []struct {
+		name       string
+		errorText  string
+		wantPoison bool
+	}{
+		{"legacy invalid request", "provider returned 400 invalid_request_error", true},
+		{"invalid request needs both markers", "provider returned status 400", false},
+		{"legacy oversized image", "image dimensions exceed max allowed size at image.source.base64.data", true},
+		{"oversized image needs both markers", "image dimensions exceed max allowed size", false},
+		{"unresolved authentication", "Could not resolve authentication method for provider", true},
+		{"empty assistant history", "message at position 7 with role 'assistant' must not be empty", true},
+		{"empty error needs history locator", "validation field must not be empty", false},
+	}
+	for i, tc := range textCases {
+		issueID := dbfx.Issue(t, "bulk resume equivalence text "+tc.name)
+		fallbackDir := fmt.Sprintf("/tmp/equivalence-text-%d-fallback/workdir", i)
+		fallbackTask := dbfx.Task(t, agentID, testutil.Cols{
+			"issue_id": issueID, "runtime_id": runtimeID, "status": "completed",
+			"session_id": fmt.Sprintf("text-%d-fallback", i), "work_dir": fallbackDir,
+			"completed_at": testutil.Raw("now() - interval '3 hours'"),
+		})
+		candidateDir := fmt.Sprintf("/tmp/equivalence-text-%d-current/workdir", i)
+		dbfx.Task(t, agentID, testutil.Cols{
+			"issue_id": issueID, "runtime_id": runtimeID, "status": "failed",
+			"session_id": fmt.Sprintf("text-%d-current", i), "work_dir": candidateDir,
+			"failure_reason": "agent_error.unknown", "error": tc.errorText,
+			"completed_at": testutil.Raw("now() - interval '1 hour'"),
+		})
+		wantWorkDir := candidateDir
+		if tc.wantPoison {
+			wantWorkDir = fallbackDir
+		}
+		scopes = append(scopes, scope{tc.name, issueID, fallbackTask, wantWorkDir})
+	}
+
+	benignIssue := dbfx.Issue(t, "bulk resume equivalence benign failure")
+	benignTask := dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": benignIssue, "runtime_id": runtimeID, "status": "failed",
+		"session_id": "benign-current", "work_dir": "/tmp/equivalence-benign-current/workdir",
+		"failure_reason": "agent_error.provider_network", "error": "connection reset",
+		"completed_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+	scopes = append(scopes, scope{"benign failed session", benignIssue, benignTask, "/tmp/equivalence-benign-current/workdir"})
+
+	cancelledIssue := dbfx.Issue(t, "bulk resume equivalence cancelled")
+	cancelledTask := dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": cancelledIssue, "runtime_id": runtimeID, "status": "cancelled",
+		"session_id": "cancelled-current", "work_dir": "/tmp/equivalence-cancelled-current/workdir",
+		"completed_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+	scopes = append(scopes, scope{"cancelled session", cancelledIssue, cancelledTask, "/tmp/equivalence-cancelled-current/workdir"})
+
+	recoveredIssue := dbfx.Issue(t, "bulk resume equivalence recovered session")
+	recoveredTask := dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": recoveredIssue, "runtime_id": runtimeID, "status": "completed",
+		"session_id": "recovered-session", "work_dir": "/tmp/equivalence-recovered/workdir",
+		"completed_at": testutil.Raw("now() - interval '3 hours'"),
+	})
+	dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": recoveredIssue, "runtime_id": runtimeID, "status": "failed",
+		"session_id": "recovered-session", "work_dir": "/tmp/equivalence-recovered/workdir",
+		"failure_reason": "api_invalid_request", "completed_at": testutil.Raw("now() - interval '2 hours'"),
+	})
+	dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": recoveredIssue, "runtime_id": runtimeID, "status": "completed",
+		"session_id": "recovered-session", "work_dir": "/tmp/equivalence-recovered/workdir",
+		"completed_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+	scopes = append(scopes, scope{"same session recovers", recoveredIssue, recoveredTask, "/tmp/equivalence-recovered/workdir"})
+
+	postOverflowIssue := dbfx.Issue(t, "bulk resume equivalence post overflow")
+	postOverflowTask := dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": postOverflowIssue, "runtime_id": runtimeID, "status": "completed",
+		"session_id": "pre-overflow", "work_dir": "/tmp/equivalence-pre-overflow/workdir",
+		"completed_at": testutil.Raw("now() - interval '3 hours'"),
+	})
+	dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": postOverflowIssue, "runtime_id": runtimeID, "status": "failed",
+		"session_id": nil, "failure_reason": "codex_resume_oversized",
+		"completed_at": testutil.Raw("now() - interval '2 hours'"),
+	})
+	dbfx.Task(t, agentID, testutil.Cols{
+		"issue_id": postOverflowIssue, "runtime_id": runtimeID, "status": "completed",
+		"session_id": "post-overflow", "work_dir": "/tmp/equivalence-post-overflow/workdir",
+		"completed_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+	scopes = append(scopes, scope{"fresh session after overflow", postOverflowIssue, postOverflowTask, "/tmp/equivalence-post-overflow/workdir"})
 
 	taskIDs := make([]pgtype.UUID, 0, len(scopes))
 	for _, item := range scopes {
@@ -1444,6 +1565,9 @@ func TestListIssueTaskEnvironmentSubjectsMatchesCanonicalSessionSelection(t *tes
 				if bulk.Valid {
 					t.Fatalf("bulk canonical workdir = %q, single-scope query found no candidate", bulk.String)
 				}
+				if item.wantWorkDir != "" {
+					t.Fatalf("single-scope query found no candidate, want %q", item.wantWorkDir)
+				}
 				return
 			}
 			if singleErr != nil {
@@ -1451,6 +1575,9 @@ func TestListIssueTaskEnvironmentSubjectsMatchesCanonicalSessionSelection(t *tes
 			}
 			if bulk.Valid != single.WorkDir.Valid || bulk.String != single.WorkDir.String {
 				t.Fatalf("bulk canonical workdir = %+v, single-scope workdir = %+v", bulk, single.WorkDir)
+			}
+			if !single.WorkDir.Valid || single.WorkDir.String != item.wantWorkDir {
+				t.Fatalf("canonical workdir = %+v, want %q", single.WorkDir, item.wantWorkDir)
 			}
 		})
 	}
