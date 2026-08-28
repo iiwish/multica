@@ -170,6 +170,31 @@ func (q *Queries) CountIssues(ctx context.Context, arg CountIssuesParams) (int64
 	return count, err
 }
 
+const countIssuesUpTo = `-- name: CountIssuesUpTo :one
+SELECT COUNT(*)::bigint
+FROM (
+    SELECT 1
+    FROM issue
+    WHERE workspace_id = $1
+    LIMIT $2::bigint
+) bounded_issues
+`
+
+type CountIssuesUpToParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Limit       int64       `json:"limit"`
+}
+
+// Bounded count for issue-limit admission and display. Callers pass only the
+// threshold needed for their decision, avoiding a full scan in an oversized
+// workspace.
+func (q *Queries) CountIssuesUpTo(ctx context.Context, arg CountIssuesUpToParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countIssuesUpTo, arg.WorkspaceID, arg.Limit)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createIssue = `-- name: CreateIssue :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
@@ -438,6 +463,74 @@ func (q *Queries) DeleteIssueMetadataKey(ctx context.Context, arg DeleteIssueMet
 		&i.LastActivityAt,
 	)
 	return i, err
+}
+
+const detachDirectChildIssues = `-- name: DetachDirectChildIssues :many
+UPDATE issue
+SET parent_issue_id = NULL,
+    stage = NULL,
+    revision = revision + 1,
+    updated_at = now(),
+    last_activity_at = GREATEST(COALESCE(last_activity_at, updated_at), now())
+WHERE workspace_id = $1
+  AND parent_issue_id = $2
+  AND NOT COALESCE(id = ANY($3::uuid[]), false)
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at
+`
+
+type DetachDirectChildIssuesParams struct {
+	WorkspaceID      pgtype.UUID   `json:"workspace_id"`
+	ParentIssueID    pgtype.UUID   `json:"parent_issue_id"`
+	ExcludedIssueIds []pgtype.UUID `json:"excluded_issue_ids"`
+}
+
+func (q *Queries) DetachDirectChildIssues(ctx context.Context, arg DetachDirectChildIssuesParams) ([]Issue, error) {
+	rows, err := q.db.Query(ctx, detachDirectChildIssues, arg.WorkspaceID, arg.ParentIssueID, arg.ExcludedIssueIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Issue{}
+	for rows.Next() {
+		var i Issue
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+			&i.OriginType,
+			&i.OriginID,
+			&i.FirstExecutedAt,
+			&i.StartDate,
+			&i.Metadata,
+			&i.Stage,
+			&i.Properties,
+			&i.Revision,
+			&i.LastActivityAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const findActiveDuplicateIssue = `-- name: FindActiveDuplicateIssue :one

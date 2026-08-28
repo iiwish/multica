@@ -129,6 +129,18 @@ SELECT id FROM issue
 WHERE id = $1 AND workspace_id = $2
 FOR UPDATE;
 
+-- name: DetachDirectChildIssues :many
+UPDATE issue
+SET parent_issue_id = NULL,
+    stage = NULL,
+    revision = revision + 1,
+    updated_at = now(),
+    last_activity_at = GREATEST(COALESCE(last_activity_at, updated_at), now())
+WHERE workspace_id = sqlc.arg(workspace_id)
+  AND parent_issue_id = sqlc.arg(parent_issue_id)
+  AND NOT COALESCE(id = ANY(sqlc.arg(excluded_issue_ids)::uuid[]), false)
+RETURNING *;
+
 -- name: CreateIssue :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
@@ -546,3 +558,15 @@ UPDATE issue
 SET first_executed_at = now()
 WHERE id = $1 AND first_executed_at IS NULL
 RETURNING id, workspace_id, creator_type, creator_id, first_executed_at;
+
+-- name: CountIssuesUpTo :one
+-- Bounded count for issue-limit admission and display. Callers pass only the
+-- threshold needed for their decision, avoiding a full scan in an oversized
+-- workspace.
+SELECT COUNT(*)::bigint
+FROM (
+    SELECT 1
+    FROM issue
+    WHERE workspace_id = $1
+    LIMIT sqlc.arg('limit')::bigint
+) bounded_issues;

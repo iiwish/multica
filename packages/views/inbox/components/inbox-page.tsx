@@ -11,6 +11,7 @@ import {
 import { useDefaultLayout } from "react-resizable-panels";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { ApiError, errorCode } from "@multica/core/api";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { useModalStore } from "@multica/core/modals";
 import {
@@ -37,6 +38,7 @@ import {
   useArchiveAllInbox,
   useArchiveAllReadInbox,
   useArchiveCompletedInbox,
+  useRetrySourceContextQuickCreate,
 } from "@multica/core/inbox/mutations";
 import {
   filterInboxItems,
@@ -94,9 +96,11 @@ import {
   resolveDetailItem,
 } from "./inbox-display";
 import { useT } from "../../i18n";
+import { useIssueLimitUpgradePrompt } from "../../modals/use-issue-limit-upgrade-prompt";
 
 export function InboxPage() {
   const { t } = useT("inbox");
+  const showIssueLimitUpgradePrompt = useIssueLimitUpgradePrompt();
   const { searchParams, replace } = useNavigation();
   const urlIssue = searchParams.get("issue") ?? "";
   const urlView: InboxView =
@@ -299,6 +303,7 @@ export function InboxPage() {
   const archiveAllMutation = useArchiveAllInbox();
   const archiveAllReadMutation = useArchiveAllReadInbox();
   const archiveCompletedMutation = useArchiveCompletedInbox();
+  const retrySourceContextMutation = useRetrySourceContextQuickCreate();
   const timeAgo = useTimeAgo();
   const typeLabels = useTypeLabels();
 
@@ -721,6 +726,37 @@ export function InboxPage() {
         </div>
       )}
       <div className="mt-4 flex gap-2">
+        {detailItem.type === "quick_create_failed" &&
+          detailItem.details?.source_context_id &&
+          detailItem.details?.task_id && (
+            <Button
+              size="sm"
+              data-testid="retry-source-context"
+              disabled={retrySourceContextMutation.isPending}
+              onClick={async () => {
+                try {
+                  await retrySourceContextMutation.mutateAsync(detailItem.details!.task_id!);
+                  toast.success(t(($) => $.toasts.source_context_retry_started));
+                } catch (error) {
+                  if (
+                    error instanceof ApiError &&
+                    errorCode(error) === "issue_limit_reached"
+                  ) {
+                    showIssueLimitUpgradePrompt();
+                    return;
+                  }
+                  toast.error(
+                    error instanceof ApiError &&
+                      errorCode(error) === "source_context_retry_unavailable"
+                      ? t(($) => $.errors.source_context_retry_unavailable)
+                      : t(($) => $.errors.source_context_retry_failed),
+                  );
+                }
+              }}
+            >
+              {t(($) => $.detail.retry_with_context)}
+            </Button>
+          )}
         {isQuickCreateOutcome(detailItem.type) && (
           <Button
             size="sm"
