@@ -73,6 +73,7 @@ type gcStats struct {
 	hermesSessionStoresReclaimed int            // per-conversation Hermes session stores reclaimed past their TTL
 	repoCachesReclaimed          int            // bare repo caches under .repos evicted past their TTL
 	taskTempDirsReclaimed        int            // per-task temp dirs under the temp base reclaimed after their owning execution ended
+	finalizedWorktreesReclaimed  int            // committed local worktrees whose transient cleanup failure was retried
 	bytesReclaimed               int64          // total bytes freed in this cycle
 	byPattern                    map[string]int // configured basename or managed path label -> reclaim count
 }
@@ -150,7 +151,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 		}
 	}
 
-	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 {
+	if stats.cleaned > 0 || stats.orphaned > 0 || stats.artifactDirs > 0 || stats.storesReclaimed > 0 || stats.hermesMemoryStoresReclaimed > 0 || stats.hermesSessionStoresReclaimed > 0 || stats.repoCachesReclaimed > 0 || stats.taskTempDirsReclaimed > 0 || stats.finalizedWorktreesReclaimed > 0 {
 		d.logger.Info("gc: cycle complete",
 			"cleaned", stats.cleaned,
 			"orphaned", stats.orphaned,
@@ -162,6 +163,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 			"hermes_session_stores_reclaimed", stats.hermesSessionStoresReclaimed,
 			"repo_caches_reclaimed", stats.repoCachesReclaimed,
 			"task_temp_dirs_reclaimed", stats.taskTempDirsReclaimed,
+			"finalized_worktrees_reclaimed", stats.finalizedWorktreesReclaimed,
 			"bytes_reclaimed", stats.bytesReclaimed,
 			"by_pattern", stats.byPattern,
 		)
@@ -189,6 +191,12 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 		if d.isActiveEnvRoot(taskDir) {
 			stats.skipped++
 			continue
+		}
+		if cleaned, cleanupErr := execenv.RetryPendingLocalWorktreeCleanup(taskDir, d.logger); cleanupErr != nil {
+			d.logger.Warn("gc: retry finalized worktree cleanup failed", "dir", taskDir, "error", cleanupErr)
+		} else if cleaned {
+			stats.finalizedWorktreesReclaimed++
+			d.logger.Info("gc: finalized worktree cleanup completed", "dir", taskDir)
 		}
 		meta, metaErr := execenv.ReadGCMeta(taskDir)
 		if metaErr == nil && meta.Kind == execenv.GCKindIssue && strings.TrimSpace(meta.IssueID) != "" {

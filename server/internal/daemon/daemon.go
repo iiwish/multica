@@ -209,6 +209,7 @@ type terminalTaskReport struct {
 	sessionID      string
 	workDir        string
 	durableWorkDir string
+	warnings       []string
 	failureReason  string
 	// sessionRolloutMissing is true when the daemon withheld this task's Codex
 	// session because its rollout was not in the store (MUL-5305). The server
@@ -5485,6 +5486,7 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 			sessionID:             result.SessionID,
 			workDir:               result.WorkDir,
 			durableWorkDir:        result.DurableWorkDir,
+			warnings:              result.Warnings,
 			sessionRolloutMissing: result.SessionRolloutMissing,
 			retiredSessionID:      result.RetiredSessionID,
 		})
@@ -5585,7 +5587,7 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 
 	switch report.kind {
 	case terminalTaskReportComplete:
-		return d.client.CompleteTask(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir)
+		return d.client.CompleteTask(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir, report.warnings...)
 	case terminalTaskReportFail:
 		return d.client.FailTask(ctx, report.taskID, report.errorMessage, report.sessionID, report.workDir, report.branchName, report.failureReason, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir)
 	default:
@@ -7154,18 +7156,31 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				taskResult.BranchName = outcome.Branch
 			}
 			if finalizeErr == nil {
-				// The configured local_directory becomes authoritative only after
-				// Finalize confirms the disposable task worktree is actually gone.
+				// The configured local_directory becomes authoritative after
+				// Finalize safely delivers and removes the disposable worktree.
 				if localAssignment != nil {
 					taskResult.DurableWorkDir = localAssignment.AbsPath
 				}
 				return
 			}
+			var cleanupPending *execenv.FinalizedWorktreeCleanupError
+			if errors.As(finalizeErr, &cleanupPending) {
+				// The branch already contains the task's work. Preserve the task's
+				// own disposition and attach a warning while the durable GC marker
+				// arranges another removal attempt after the transient lock clears.
+				warning := fmt.Sprintf("local_directory worktree: %v", cleanupPending)
+				taskResult.Warnings = append(taskResult.Warnings, warning)
+				if localAssignment != nil {
+					taskResult.DurableWorkDir = localAssignment.AbsPath
+				}
+				taskLog.Warn("local_directory: finalized worktree cleanup deferred",
+					"error", finalizeErr, "path", outcome.CleanupPendingPath)
+				return
+			}
 			// Finalize could not complete its delivery contract, so the task
-			// worktree remains authoritative. This covers both an uncommitted
-			// change set and a committed branch whose worktree removal could not
-			// be confirmed. Fail the task: reporting success or a durable project
-			// directory here would hide the path that still needs attention.
+			// worktree remains authoritative because the changes could not be
+			// committed safely. Fail the task: reporting success or a durable
+			// project directory here would hide the only copy of the work.
 			//
 			// Wrapped in worktreePreservedError so the cancel path can
 			// recognise it: a cancelled task discards its result and error, but

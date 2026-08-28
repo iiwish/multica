@@ -432,8 +432,9 @@ type AgentTaskResponse struct {
 	// WorkDir directly; newer UIs should prefer RelativeWorkDir.
 	RelativeWorkDir string `json:"relative_work_dir,omitempty"`
 	// DurableWorkDir is the daemon-confirmed directory that remains usable
-	// after a disposable task worktree has been finalized and removed. It is a
-	// point-in-time task snapshot and does not follow later resource edits.
+	// after a disposable task worktree safely delivers its branch. A result
+	// warning may still report deferred cleanup of that disposable path. It is
+	// a point-in-time task snapshot and does not follow later resource edits.
 	DurableWorkDir string `json:"durable_work_dir,omitempty"`
 	// RelativeDurableWorkDir is the privacy-safe display form. The absolute
 	// value is retained for explicit clipboard actions only.

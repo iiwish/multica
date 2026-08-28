@@ -537,6 +537,100 @@ func TestRemoveAllWithRetryReturnsLastErrorAfterBoundedAttempts(t *testing.T) {
 	}
 }
 
+func TestFinalizeCleanupFailureKeepsSuccessAndReaperRetries(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	writeFile(t, filepath.Join(wt.Path, "agent-output.txt"), "durable work\n")
+
+	locked := errors.New("directory is still in use")
+	outcome, err := wt.finalize(worktreeTestLogger(), func(_, _ string, _ *slog.Logger) error {
+		return locked
+	})
+	var cleanupErr *FinalizedWorktreeCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("Finalize error = %T %v, want FinalizedWorktreeCleanupError", err, err)
+	}
+	if !errors.Is(err, locked) {
+		t.Fatalf("Finalize error = %v, want wrapped lock error", err)
+	}
+	if outcome.Branch != wt.Branch {
+		t.Fatalf("Branch = %q, want delivered branch %q", outcome.Branch, wt.Branch)
+	}
+	if outcome.PreservedPath != "" {
+		t.Fatalf("PreservedPath = %q, but the branch already holds the work", outcome.PreservedPath)
+	}
+	if outcome.CleanupPendingPath != wt.Path {
+		t.Fatalf("CleanupPendingPath = %q, want %q", outcome.CleanupPendingPath, wt.Path)
+	}
+	if got := gitRun(t, repo, "show", wt.Branch+":agent-output.txt"); got != "durable work" {
+		t.Fatalf("delivered branch lost work: %q", got)
+	}
+
+	cleaned, err := RetryPendingLocalWorktreeCleanup(filepath.Dir(wt.Path), worktreeTestLogger())
+	if err != nil {
+		t.Fatalf("RetryPendingLocalWorktreeCleanup: %v", err)
+	}
+	if !cleaned {
+		t.Fatal("RetryPendingLocalWorktreeCleanup did not find the durable marker")
+	}
+	if _, err := os.Lstat(wt.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree still exists after retry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(wt.Path), pendingLocalWorktreeCleanupFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup marker still exists after retry: %v", err)
+	}
+	if got := gitRun(t, repo, "show", wt.Branch+":agent-output.txt"); got != "durable work" {
+		t.Fatalf("cleanup retry removed delivered branch work: %q", got)
+	}
+}
+
+func TestPendingCleanupDropsUnchangedBranchAfterRemoval(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+
+	outcome, err := wt.finalize(worktreeTestLogger(), func(_, _ string, _ *slog.Logger) error {
+		return errors.New("directory is still in use")
+	})
+	var cleanupErr *FinalizedWorktreeCleanupError
+	if !errors.As(err, &cleanupErr) {
+		t.Fatalf("Finalize error = %T %v, want cleanup warning", err, err)
+	}
+	if outcome.Branch != "" {
+		t.Fatalf("Branch = %q, want empty for a read-only task", outcome.Branch)
+	}
+
+	cleaned, err := RetryPendingLocalWorktreeCleanup(filepath.Dir(wt.Path), worktreeTestLogger())
+	if err != nil || !cleaned {
+		t.Fatalf("cleanup retry = %v, cleaned=%v", err, cleaned)
+	}
+	if out, err := gitTry(t, repo, "rev-parse", "--verify", wt.Branch); err == nil {
+		t.Fatalf("unchanged branch survived cleanup retry: %s", out)
+	}
+}
+
+func TestPendingCleanupMarkerCannotEscapeEnvRoot(t *testing.T) {
+	envRoot := t.TempDir()
+	pending := pendingLocalWorktreeCleanup{
+		Version:      1,
+		GitRoot:      t.TempDir(),
+		WorktreePath: filepath.Join(t.TempDir(), "outside"),
+	}
+	if err := writePendingLocalWorktreeCleanup(envRoot, pending); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	removeCalled := false
+	_, err := retryPendingLocalWorktreeCleanup(envRoot, worktreeTestLogger(), func(_, _ string, _ *slog.Logger) error {
+		removeCalled = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid pending") {
+		t.Fatalf("error = %v, want invalid marker", err)
+	}
+	if removeCalled {
+		t.Fatal("invalid marker reached worktree removal")
+	}
+}
+
 // The one operation in this flow that can destroy work is `git worktree remove
 // --force`. If the agent's changes could not be committed, removing the
 // worktree would delete the only copy — so Finalize must keep it and say so.

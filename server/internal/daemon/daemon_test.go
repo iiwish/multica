@@ -4065,6 +4065,7 @@ func TestReportTaskResult_CompletedHitsCompleteEndpoint(t *testing.T) {
 		BranchName: "agent/foo",
 		SessionID:  "ses-1",
 		WorkDir:    "/tmp/foo",
+		Warnings:   []string{"worktree cleanup is pending"},
 	}, slog.Default())
 
 	rec.mu.Lock()
@@ -4080,6 +4081,10 @@ func TestReportTaskResult_CompletedHitsCompleteEndpoint(t *testing.T) {
 	}
 	if rec.payload["session_id"] != "ses-1" {
 		t.Errorf("session_id: got %v", rec.payload["session_id"])
+	}
+	warnings, ok := rec.payload["warnings"].([]any)
+	if !ok || len(warnings) != 1 || warnings[0] != "worktree cleanup is pending" {
+		t.Errorf("warnings: got %#v", rec.payload["warnings"])
 	}
 }
 

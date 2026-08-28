@@ -2,6 +2,7 @@ package execenv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -67,6 +68,8 @@ const (
 	// cleanup without turning successful agent work into a failed task (#7548).
 	worktreeRemoveAttempts   = 5
 	worktreeRemoveRetryDelay = 100 * time.Millisecond
+
+	pendingLocalWorktreeCleanupFile = ".pending_local_worktree_cleanup.json"
 )
 
 // LocalWorktreeParams describes the worktree Prepare should build for a
@@ -127,6 +130,32 @@ type LocalWorktreeOutcome struct {
 	// changes. The worktree at this path was intentionally left on disk because
 	// it is the only remaining copy of that work.
 	PreservedPath string
+	// CleanupPendingPath is set when the work was safely committed to Branch but
+	// the disposable worktree directory could not yet be removed. The task can
+	// still complete; the daemon GC retries this cleanup from a durable marker.
+	CleanupPendingPath string
+}
+
+// FinalizedWorktreeCleanupError distinguishes post-commit cleanup trouble from
+// a delivery failure. The work is already durable on the task branch, so callers
+// should surface this as a warning rather than replacing the task result.
+type FinalizedWorktreeCleanupError struct {
+	Path string
+	err  error
+}
+
+func (e *FinalizedWorktreeCleanupError) Error() string {
+	return fmt.Sprintf("worktree cleanup is pending for %s: %v", e.Path, e.err)
+}
+
+func (e *FinalizedWorktreeCleanupError) Unwrap() error { return e.err }
+
+type pendingLocalWorktreeCleanup struct {
+	Version      int    `json:"version"`
+	GitRoot      string `json:"git_root"`
+	WorktreePath string `json:"worktree_path"`
+	Branch       string `json:"branch,omitempty"`
+	DeleteBranch bool   `json:"delete_branch,omitempty"`
 }
 
 // PrepareLocalWorktree creates the task's worktree and replays the user's
@@ -343,8 +372,16 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 // one operation in this file that destroys work with no way back, and a warning
 // in the daemon log is not an acceptable substitute for the user's changes. The
 // surviving worktree stays registered in the user's repo, so `git worktree list`
-// points straight at it.
+// points straight at it. A removal failure after the commit is different: the
+// branch already satisfies the delivery contract, so Finalize returns a typed
+// cleanup warning and writes a marker for the daemon GC to retry later.
 func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, error) {
+	return w.finalize(logger, removeLocalWorktreeDir)
+}
+
+type localWorktreeRemover func(gitRoot, worktreePath string, logger *slog.Logger) error
+
+func (w *LocalWorktree) finalize(logger *slog.Logger, remove localWorktreeRemover) (LocalWorktreeOutcome, error) {
 	if w == nil {
 		return LocalWorktreeOutcome{}, nil
 	}
@@ -412,17 +449,29 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 	// ever grows for tasks that actually produced work.
 	tip, err := runGitTrimmed(w.Path, "rev-parse", "--verify", "HEAD")
 	producedWork := err != nil || tip != w.BaseCommit
+	if !producedWork {
+		// The branch cannot be deleted until the worktree is unregistered, but it
+		// must not be reported as a deliverable while cleanup is pending.
+		outcome.Branch = ""
+	}
 
-	if removeErr := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); removeErr != nil {
-		outcome.PreservedPath = w.Path
-		return outcome, fmt.Errorf(
-			"could not remove finalized worktree for branch %s: %w; the task worktree remains at %s",
-			w.Branch, removeErr, w.Path)
+	if removeErr := remove(w.GitRoot, w.Path, logger); removeErr != nil {
+		outcome.CleanupPendingPath = w.Path
+		markerErr := writePendingLocalWorktreeCleanup(filepath.Dir(w.Path), pendingLocalWorktreeCleanup{
+			Version:      1,
+			GitRoot:      w.GitRoot,
+			WorktreePath: w.Path,
+			Branch:       w.Branch,
+			DeleteBranch: !producedWork,
+		})
+		if markerErr != nil {
+			removeErr = errors.Join(removeErr, fmt.Errorf("record cleanup retry: %w", markerErr))
+		}
+		return outcome, &FinalizedWorktreeCleanupError{Path: w.Path, err: removeErr}
 	}
 
 	if !producedWork {
 		deleteBranch(w.GitRoot, w.Branch, logger)
-		outcome.Branch = ""
 	}
 
 	if logger != nil {
@@ -434,6 +483,68 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		)
 	}
 	return outcome, nil
+}
+
+func writePendingLocalWorktreeCleanup(envRoot string, pending pendingLocalWorktreeCleanup) error {
+	if strings.TrimSpace(envRoot) == "" {
+		return errors.New("env root is empty")
+	}
+	data, err := json.Marshal(pending)
+	if err != nil {
+		return fmt.Errorf("marshal pending worktree cleanup: %w", err)
+	}
+	path := filepath.Join(envRoot, pendingLocalWorktreeCleanupFile)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// RetryPendingLocalWorktreeCleanup revisits a post-commit removal failure
+// recorded by Finalize. The marker lives beside the worktree in the task env
+// root, so it survives daemon restarts and is retried by every GC cycle.
+func RetryPendingLocalWorktreeCleanup(envRoot string, logger *slog.Logger) (bool, error) {
+	return retryPendingLocalWorktreeCleanup(envRoot, logger, removeLocalWorktreeDir)
+}
+
+func retryPendingLocalWorktreeCleanup(envRoot string, logger *slog.Logger, remove localWorktreeRemover) (bool, error) {
+	markerPath := filepath.Join(envRoot, pendingLocalWorktreeCleanupFile)
+	data, err := os.ReadFile(markerPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read pending worktree cleanup: %w", err)
+	}
+
+	var pending pendingLocalWorktreeCleanup
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return false, fmt.Errorf("decode pending worktree cleanup: %w", err)
+	}
+	expectedPath := filepath.Clean(filepath.Join(envRoot, localWorktreeDirName))
+	if pending.Version != 1 || filepath.Clean(pending.WorktreePath) != expectedPath || !filepath.IsAbs(pending.GitRoot) {
+		return false, errors.New("invalid pending worktree cleanup marker")
+	}
+	unlock, err := lockGitRoot(pending.GitRoot, logger)
+	if err != nil {
+		return false, fmt.Errorf("lock repository for pending worktree cleanup: %w", err)
+	}
+	defer unlock()
+	if err := remove(pending.GitRoot, pending.WorktreePath, logger); err != nil {
+		return false, err
+	}
+	if pending.DeleteBranch {
+		deleteBranch(pending.GitRoot, pending.Branch, logger)
+	}
+	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("remove pending worktree cleanup marker: %w", err)
+	}
+	return true, nil
 }
 
 // Discard tears a worktree down without delivering anything: unregister it,
