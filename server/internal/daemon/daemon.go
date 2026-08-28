@@ -6580,6 +6580,15 @@ func qualifyTaskModel(
 	return qualified
 }
 
+// Task-result warnings are rendered in shared task history. Keep host-specific
+// paths and raw OS errors in daemon logs, not in the persisted result.
+func finalizedWorktreeCleanupWarning(retryRecorded bool) string {
+	if retryRecorded {
+		return "local_directory worktree cleanup was deferred after task completion; an automatic retry was recorded"
+	}
+	return "local_directory worktree cleanup was deferred after task completion; no automatic retry was recorded, so inspect the repository with git worktree list and clean up manually if it is still present"
+}
+
 func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (taskResult TaskResult, returnErr error) {
 	// A claim carries the task-row agent id both at the top level and inside
 	// the expanded agent configuration. The top-level id is authoritative
@@ -7186,17 +7195,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				// The branch already contains the task's work. Preserve the task's
 				// own disposition, but distinguish a durable automatic retry from a
 				// marker failure that needs manual cleanup.
-				warning := fmt.Sprintf(
-					"local_directory worktree cleanup is pending at %s; the daemon will retry automatically: %v",
-					cleanupPending.Path, cleanupPending.Unwrap(),
-				)
-				if !cleanupPending.RetryRecorded {
-					warning = fmt.Sprintf(
-						"local_directory worktree cleanup is pending at %s; automatic retry could not be recorded, so manual cleanup is required: %v",
-						cleanupPending.Path, cleanupPending.Unwrap(),
-					)
-				}
-				taskResult.Warnings = append(taskResult.Warnings, warning)
+				taskResult.Warnings = append(taskResult.Warnings,
+					finalizedWorktreeCleanupWarning(cleanupPending.RetryRecorded))
 				if localAssignment != nil {
 					taskResult.DurableWorkDir = localAssignment.AbsPath
 				}

@@ -4014,6 +4014,36 @@ type reportTaskResultRecorder struct {
 	payload map[string]any
 }
 
+func TestFinalizedWorktreeCleanupWarningIsPathFreeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		retryRecorded bool
+		want          string
+	}{
+		{
+			name:          "automatic retry recorded",
+			retryRecorded: true,
+			want:          "local_directory worktree cleanup was deferred after task completion; an automatic retry was recorded",
+		},
+		{
+			name:          "manual cleanup may be needed",
+			retryRecorded: false,
+			want:          "local_directory worktree cleanup was deferred after task completion; no automatic retry was recorded, so inspect the repository with git worktree list and clean up manually if it is still present",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := finalizedWorktreeCleanupWarning(tt.retryRecorded); got != tt.want {
+				t.Fatalf("finalizedWorktreeCleanupWarning(%t) = %q, want %q", tt.retryRecorded, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTerminalTaskReportTimeoutCoversRetrySchedule(t *testing.T) {
 	client := NewClient("http://example.invalid")
 	worstCase := time.Duration(len(defaultTerminalRetrySchedule)+1) * client.client.Timeout
