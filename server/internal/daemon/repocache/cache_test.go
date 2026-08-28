@@ -120,6 +120,54 @@ func TestRunGitOutputTimesOut(t *testing.T) {
 	}
 }
 
+func TestNewGitCommandUsesStableWorkingDirectory(t *testing.T) {
+	cmd := newGitCommand("--version")
+	if cmd.Dir == "" {
+		t.Fatal("newGitCommand Dir is empty; Git would inherit the daemon working directory")
+	}
+	if !filepath.IsAbs(cmd.Dir) {
+		t.Fatalf("newGitCommand Dir = %q, want an absolute path", cmd.Dir)
+	}
+	if info, err := os.Stat(cmd.Dir); err != nil {
+		t.Fatalf("newGitCommand Dir = %q is unavailable: %v", cmd.Dir, err)
+	} else if !info.IsDir() {
+		t.Fatalf("newGitCommand Dir = %q is not a directory", cmd.Dir)
+	}
+}
+
+func TestSyncSurvivesDeletedProcessWorkingDirectory(t *testing.T) {
+	sourceRepo := createTestRepo(t)
+	cacheRoot := t.TempDir()
+	originalCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get original working directory: %v", err)
+	}
+	deletedRoot := t.TempDir()
+	deletedCWD := filepath.Join(deletedRoot, "worktree")
+	if err := os.Mkdir(deletedCWD, 0o755); err != nil {
+		t.Fatalf("create disposable working directory: %v", err)
+	}
+	if err := os.Chdir(deletedCWD); err != nil {
+		t.Fatalf("chdir to disposable working directory: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(originalCWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	}()
+	if err := os.RemoveAll(deletedRoot); err != nil {
+		t.Skipf("platform does not allow removing the process working directory: %v", err)
+	}
+
+	cache := New(cacheRoot, testLogger())
+	if err := cache.Sync("ws-deleted-cwd", []RepoInfo{{URL: sourceRepo}}); err != nil {
+		t.Fatalf("Sync with deleted process working directory failed: %v", err)
+	}
+	if cachedPath := cache.Lookup("ws-deleted-cwd", sourceRepo); !isBareRepo(cachedPath) {
+		t.Fatalf("expected synced bare repo, got %q", cachedPath)
+	}
+}
+
 func TestRepoMaintenanceYieldsToForeground(t *testing.T) {
 	t.Parallel()
 
