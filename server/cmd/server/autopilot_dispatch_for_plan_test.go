@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -220,6 +221,7 @@ func TestDispatchAutopilotSuppressesRecentDuplicateIssue(t *testing.T) {
 func TestDispatchAutopilotUsesPayloadTitleToDistinguishWebhookDeliveries(t *testing.T) {
 	ctx := context.Background()
 	queries := db.New(testPool)
+	fx := testutil.New(testPool, testWorkspaceID, testUserID)
 	bus := events.New()
 	taskSvc := service.NewTaskService(queries, testPool, nil, bus)
 	autopilotSvc := service.NewAutopilotService(queries, testPool, bus, taskSvc)
@@ -233,27 +235,32 @@ func TestDispatchAutopilotUsesPayloadTitleToDistinguishWebhookDeliveries(t *test
 	}
 
 	titlePrefix := "Webhook delivery " + time.Now().UTC().Format("20060102150405.000000000")
-	ap, err := queries.CreateAutopilot(ctx, db.CreateAutopilotParams{
-		WorkspaceID:        parseUUID(testWorkspaceID),
-		Title:              "Per-delivery title variables",
-		Description:        pgtype.Text{String: "Per-delivery title test", Valid: true},
-		AssigneeType:       "agent",
-		AssigneeID:         parseUUID(agentID),
-		Status:             "active",
-		ExecutionMode:      "create_issue",
-		IssueTitleTemplate: pgtype.Text{String: titlePrefix + " {{payload.identifier}}", Valid: true},
-		CreatedByType:      "member",
-		CreatedByID:        parseUUID(testUserID),
+	apID := fx.Insert(t, "autopilot", testutil.Cols{
+		"workspace_id":         testWorkspaceID,
+		"title":                "Per-delivery title variables",
+		"description":          "Per-delivery title test",
+		"assignee_type":        "agent",
+		"assignee_id":          agentID,
+		"status":               "active",
+		"execution_mode":       "create_issue",
+		"issue_title_template": titlePrefix + " {{payload.identifier}}",
+		"created_by_type":      "member",
+		"created_by_id":        testUserID,
 	})
+	ap, err := queries.GetAutopilot(ctx, parseUUID(apID))
 	if err != nil {
-		t.Fatalf("CreateAutopilot: %v", err)
+		t.Fatalf("GetAutopilot fixture: %v", err)
 	}
-	t.Cleanup(func() {
-		bg := context.Background()
-		_, _ = testPool.Exec(bg, `DELETE FROM autopilot_run WHERE autopilot_id = $1`, ap.ID)
-		_, _ = testPool.Exec(bg, `DELETE FROM issue WHERE workspace_id = $1 AND title LIKE $2`, testWorkspaceID, titlePrefix+"%")
-		_, _ = testPool.Exec(bg, `DELETE FROM autopilot WHERE id = $1`, ap.ID)
-	})
+	// Dispatch creates the remaining rows rather than the test fixture itself.
+	// Register their cleanup in parent-to-child order: Fixture cleanup runs in
+	// reverse, so queued tasks go first, then runs, issues, and the autopilot.
+	fx.Cleanup(t, `DELETE FROM issue WHERE origin_type = 'autopilot' AND origin_id = $1`, ap.ID)
+	fx.Cleanup(t, `DELETE FROM autopilot_run WHERE autopilot_id = $1`, ap.ID)
+	fx.Cleanup(t, `
+		DELETE FROM agent_task_queue
+		WHERE autopilot_run_id IN (SELECT id FROM autopilot_run WHERE autopilot_id = $1)
+		   OR issue_id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id = $1)
+	`, ap.ID)
 
 	payload := func(identifier string) []byte {
 		return []byte(`{"event":"ticket.updated","eventPayload":{"identifier":"` + identifier + `"}}`)
