@@ -422,6 +422,7 @@ export const AgentTaskSchema: z.ZodType<AgentTask> = z.object({
   completed_at: z.string().nullable().default(null),
   result: z.unknown().default(null),
   error: z.string().nullable().default(null),
+  warnings: z.array(z.string()).optional().catch(undefined),
   // Backend uses empty string ("") as the "not failed" sentinel (Go
   // `omitempty` on a custom string-typed enum). Normalize that to `undefined`
   // so downstream truthy checks (`if (task.failure_reason)`) don't have to

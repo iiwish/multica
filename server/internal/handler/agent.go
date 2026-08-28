@@ -399,6 +399,7 @@ type AgentTaskResponse struct {
 	CompletedAt          *string                `json:"completed_at"`
 	Result               any                    `json:"result"`
 	Error                *string                `json:"error"`
+	Warnings             []string               `json:"warnings,omitempty"`
 	FailureReason        string                 `json:"failure_reason,omitempty"` // see TaskService.MaybeRetryFailedTask
 	Attempt              int32                  `json:"attempt"`
 	MaxAttempts          int32                  `json:"max_attempts"`
@@ -754,8 +755,12 @@ type TaskAgentData struct {
 // it, in which case RelativeWorkDir falls back to the existing WorkDir.
 func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 	var result any
+	var resultMetadata struct {
+		Warnings []string `json:"warnings"`
+	}
 	if t.Result != nil {
 		json.Unmarshal(t.Result, &result)
+		json.Unmarshal(t.Result, &resultMetadata)
 	}
 	failureReason := ""
 	if t.FailureReason.Valid {
@@ -790,6 +795,7 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		CompletedAt:            timestampToPtr(t.CompletedAt),
 		Result:                 result,
 		Error:                  textToPtr(t.Error),
+		Warnings:               resultMetadata.Warnings,
 		FailureReason:          failureReason,
 		BranchName:             branchName,
 		Attempt:                t.Attempt,

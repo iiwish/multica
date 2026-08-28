@@ -7184,15 +7184,26 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			var cleanupPending *execenv.FinalizedWorktreeCleanupError
 			if errors.As(finalizeErr, &cleanupPending) {
 				// The branch already contains the task's work. Preserve the task's
-				// own disposition and attach a warning while the durable GC marker
-				// arranges another removal attempt after the transient lock clears.
-				warning := fmt.Sprintf("local_directory worktree: %v", cleanupPending)
+				// own disposition, but distinguish a durable automatic retry from a
+				// marker failure that needs manual cleanup.
+				warning := fmt.Sprintf(
+					"local_directory worktree cleanup is pending at %s; the daemon will retry automatically: %v",
+					cleanupPending.Path, cleanupPending.Unwrap(),
+				)
+				if !cleanupPending.RetryRecorded {
+					warning = fmt.Sprintf(
+						"local_directory worktree cleanup is pending at %s; automatic retry could not be recorded, so manual cleanup is required: %v",
+						cleanupPending.Path, cleanupPending.Unwrap(),
+					)
+				}
 				taskResult.Warnings = append(taskResult.Warnings, warning)
 				if localAssignment != nil {
 					taskResult.DurableWorkDir = localAssignment.AbsPath
 				}
 				taskLog.Warn("local_directory: finalized worktree cleanup deferred",
-					"error", finalizeErr, "path", outcome.CleanupPendingPath)
+					"error", finalizeErr,
+					"path", outcome.CleanupPendingPath,
+					"retry_recorded", cleanupPending.RetryRecorded)
 				return
 			}
 			// Finalize could not complete its delivery contract, so the task

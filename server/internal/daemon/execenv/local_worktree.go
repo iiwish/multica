@@ -140,8 +140,9 @@ type LocalWorktreeOutcome struct {
 // a delivery failure. The work is already durable on the task branch, so callers
 // should surface this as a warning rather than replacing the task result.
 type FinalizedWorktreeCleanupError struct {
-	Path string
-	err  error
+	Path          string
+	RetryRecorded bool
+	err           error
 }
 
 func (e *FinalizedWorktreeCleanupError) Error() string {
@@ -374,14 +375,24 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 // surviving worktree stays registered in the user's repo, so `git worktree list`
 // points straight at it. A removal failure after the commit is different: the
 // branch already satisfies the delivery contract, so Finalize returns a typed
-// cleanup warning and writes a marker for the daemon GC to retry later.
+// cleanup warning. It records the GC retry before attempting removal, so a
+// daemon crash cannot strand an unregistered worktree between those steps.
 func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, error) {
 	return w.finalize(logger, removeLocalWorktreeDir)
 }
 
 type localWorktreeRemover func(gitRoot, worktreePath string, logger *slog.Logger) error
+type pendingLocalWorktreeCleanupWriter func(envRoot string, pending pendingLocalWorktreeCleanup) error
 
 func (w *LocalWorktree) finalize(logger *slog.Logger, remove localWorktreeRemover) (LocalWorktreeOutcome, error) {
+	return w.finalizeWithOps(logger, remove, writePendingLocalWorktreeCleanup)
+}
+
+func (w *LocalWorktree) finalizeWithOps(
+	logger *slog.Logger,
+	remove localWorktreeRemover,
+	writePending pendingLocalWorktreeCleanupWriter,
+) (LocalWorktreeOutcome, error) {
 	if w == nil {
 		return LocalWorktreeOutcome{}, nil
 	}
@@ -455,23 +466,40 @@ func (w *LocalWorktree) finalize(logger *slog.Logger, remove localWorktreeRemove
 		outcome.Branch = ""
 	}
 
+	pending := pendingLocalWorktreeCleanup{
+		Version:      1,
+		GitRoot:      w.GitRoot,
+		WorktreePath: w.Path,
+		Branch:       w.Branch,
+		DeleteBranch: !producedWork,
+	}
+	if markerErr := writePending(filepath.Dir(w.Path), pending); markerErr != nil {
+		outcome.CleanupPendingPath = w.Path
+		return outcome, &FinalizedWorktreeCleanupError{
+			Path:          w.Path,
+			RetryRecorded: false,
+			err:           fmt.Errorf("record cleanup retry before removal: %w", markerErr),
+		}
+	}
+
 	if removeErr := remove(w.GitRoot, w.Path, logger); removeErr != nil {
 		outcome.CleanupPendingPath = w.Path
-		markerErr := writePendingLocalWorktreeCleanup(filepath.Dir(w.Path), pendingLocalWorktreeCleanup{
-			Version:      1,
-			GitRoot:      w.GitRoot,
-			WorktreePath: w.Path,
-			Branch:       w.Branch,
-			DeleteBranch: !producedWork,
-		})
-		if markerErr != nil {
-			removeErr = errors.Join(removeErr, fmt.Errorf("record cleanup retry: %w", markerErr))
+		return outcome, &FinalizedWorktreeCleanupError{
+			Path:          w.Path,
+			RetryRecorded: true,
+			err:           removeErr,
 		}
-		return outcome, &FinalizedWorktreeCleanupError{Path: w.Path, err: removeErr}
 	}
 
 	if !producedWork {
 		deleteBranch(w.GitRoot, w.Branch, logger)
+	}
+	markerPath := filepath.Join(filepath.Dir(w.Path), pendingLocalWorktreeCleanupFile)
+	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) && logger != nil {
+		// The recorded cleanup is idempotent. Leaving its marker behind only
+		// causes GC to confirm the already-completed removal once more.
+		logger.Warn("execenv: remove completed worktree cleanup marker failed (non-fatal)",
+			"path", markerPath, "error", err)
 	}
 
 	if logger != nil {
