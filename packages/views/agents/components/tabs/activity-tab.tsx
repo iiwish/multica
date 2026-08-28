@@ -41,9 +41,9 @@ import { useT, useTimeAgo } from "../../../i18n";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 // Recent work pagination: small initial cohort to keep the section
-// scannable, then "Show more" reveals 20 at a time. The paged API client has
-// already assembled and cached the agent's full task history, so "more" is a
-// pure state flip with no additional request.
+// scannable, then "Show more" reveals 20 at a time. Tasks are already
+// fully cached client-side (one listAgentTasks for the whole agent), so
+// "more" is a pure state flip — zero extra fetches.
 const RECENT_INITIAL = 10;
 const RECENT_PAGE = 20;
 // Placeholder rows shown while the lazily-loaded per-agent task list is

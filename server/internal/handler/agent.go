@@ -10,9 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -38,10 +36,6 @@ import (
 const maxAgentDescriptionLength = 255
 
 const (
-	maxAgentTaskListLimit             = 1000
-	agentTaskHasMoreHeader            = "X-Multica-Has-More"
-	agentTaskNextBeforeHeader         = "X-Multica-Next-Before"
-	agentTaskNextBeforeIDHeader       = "X-Multica-Next-Before-ID"
 	maxAgentConversationStarters      = 3
 	maxAgentConversationStarterLabel  = 80
 	maxAgentConversationStarterLength = 4000
@@ -521,9 +515,9 @@ type AgentTaskResponse struct {
 	Attribution *TaskAttribution `json:"attribution,omitempty"`
 	// Usage is this run's own token consumption, one entry per (provider, model)
 	// it used — the same grain `task_usage` stores and the same grain the client
-	// prices at. Hydrated on user-facing task-history endpoints; the daemon claim
-	// path leaves it nil so the claim payload does not carry accounting the agent
-	// has no use for.
+	// prices at. Hydrated on issue execution logs and explicit agent-history
+	// accounting requests; normal UI history and daemon claims leave it nil so
+	// those payloads do not carry accounting they do not use.
 	//
 	// nil and [] are both "no usage recorded" and the UI renders an em dash for
 	// them — a run that predates usage reporting, or one that died before any
@@ -2471,100 +2465,43 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params, pageLimit, err := parseAgentTaskListParams(r, agent.ID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	includeUsage := false
+	switch raw := strings.TrimSpace(r.URL.Query().Get("include_usage")); raw {
+	case "", "false":
+	case "true":
+		includeUsage = true
+	default:
+		writeError(w, http.StatusBadRequest, "include_usage must be true or false")
 		return
 	}
 
-	tasks, err := h.Queries.ListAgentTasks(r.Context(), params)
+	tasks, err := h.Queries.ListAgentTasks(r.Context(), agent.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list agent tasks")
 		return
 	}
-	if pageLimit > 0 {
-		hasMore := len(tasks) > pageLimit
-		if hasMore {
-			tasks = tasks[:pageLimit]
-			last := tasks[len(tasks)-1]
-			w.Header().Set(agentTaskNextBeforeHeader, last.CreatedAt.Time.Format(time.RFC3339Nano))
-			w.Header().Set(agentTaskNextBeforeIDHeader, uuidToString(last.ID))
-		}
-		w.Header().Set(agentTaskHasMoreHeader, strconv.FormatBool(hasMore))
-	}
 
 	resp := make([]AgentTaskResponse, len(tasks))
-	taskIDs := make([]pgtype.UUID, len(tasks))
+	var taskIDs []pgtype.UUID
+	if includeUsage {
+		taskIDs = make([]pgtype.UUID, len(tasks))
+	}
 	for i, t := range tasks {
 		resp[i] = taskToResponse(t, workspaceID)
-		taskIDs[i] = t.ID
+		if includeUsage {
+			taskIDs[i] = t.ID
+		}
 	}
 	h.hydrateTaskAttributions(r.Context(), attributionsOf(resp))
-	if err := h.hydrateAgentTaskUsage(r.Context(), agent.ID, taskIDs, resp); err != nil {
-		slog.Warn("list agent task usage failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
-		writeError(w, http.StatusInternalServerError, "failed to list agent task usage")
-		return
+	if includeUsage {
+		if err := h.hydrateAgentTaskUsage(r.Context(), agent.ID, taskIDs, resp); err != nil {
+			slog.Warn("list agent task usage failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+			writeError(w, http.StatusInternalServerError, "failed to list agent task usage")
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func parseAgentTaskListParams(r *http.Request, agentID pgtype.UUID) (db.ListAgentTasksParams, int, error) {
-	query := r.URL.Query()
-	params := db.ListAgentTasksParams{AgentID: agentID}
-
-	parseBound := func(name string) (pgtype.Timestamptz, error) {
-		raw := strings.TrimSpace(query.Get(name))
-		if raw == "" {
-			return pgtype.Timestamptz{}, nil
-		}
-		parsed, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			return pgtype.Timestamptz{}, fmt.Errorf("%s must be an RFC3339 timestamp", name)
-		}
-		return pgtype.Timestamptz{Time: parsed, Valid: true}, nil
-	}
-
-	var err error
-	params.Since, err = parseBound("since")
-	if err != nil {
-		return db.ListAgentTasksParams{}, 0, err
-	}
-	params.Until, err = parseBound("until")
-	if err != nil {
-		return db.ListAgentTasksParams{}, 0, err
-	}
-	if params.Since.Valid && params.Until.Valid && !params.Since.Time.Before(params.Until.Time) {
-		return db.ListAgentTasksParams{}, 0, errors.New("since must be earlier than until")
-	}
-
-	beforeRaw := strings.TrimSpace(query.Get("before"))
-	beforeIDRaw := strings.TrimSpace(query.Get("before_id"))
-	if (beforeRaw == "") != (beforeIDRaw == "") {
-		return db.ListAgentTasksParams{}, 0, errors.New("before and before_id must be set together")
-	}
-	if beforeRaw != "" {
-		params.Before, err = parseBound("before")
-		if err != nil {
-			return db.ListAgentTasksParams{}, 0, err
-		}
-		params.BeforeID, err = util.ParseUUID(beforeIDRaw)
-		if err != nil {
-			return db.ListAgentTasksParams{}, 0, errors.New("before_id must be a UUID")
-		}
-	}
-
-	pageLimit := 0
-	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
-		limit, err := strconv.Atoi(raw)
-		if err != nil || limit < 1 || limit > maxAgentTaskListLimit {
-			return db.ListAgentTasksParams{}, 0, fmt.Errorf("limit must be between 1 and %d", maxAgentTaskListLimit)
-		}
-		pageLimit = limit
-		params.LimitRows = pgtype.Int4{Int32: int32(limit + 1), Valid: true}
-	}
-
-	return params, pageLimit, nil
 }
 
 // AgentActivityBucket is one day-bucketed throughput sample for the

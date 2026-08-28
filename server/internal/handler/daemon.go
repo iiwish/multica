@@ -4892,8 +4892,8 @@ func (h *Handler) hydrateTaskUsage(ctx context.Context, issueID pgtype.UUID, res
 
 // hydrateAgentTaskUsage attaches the same per-run accounting shape used by the
 // issue execution log to an agent's user-facing task history. One agent-scoped
-// query covers exactly the returned task IDs so filtered or limited requests do
-// not scan unrelated history and do not pay an N+1 cost.
+// query covers exactly the returned task IDs, avoiding unrelated history and an
+// N+1 query per task.
 func (h *Handler) hydrateAgentTaskUsage(ctx context.Context, agentID pgtype.UUID, taskIDs []pgtype.UUID, resp []AgentTaskResponse) error {
 	if len(resp) == 0 {
 		return nil

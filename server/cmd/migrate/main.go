@@ -273,7 +273,6 @@ var concurrentIndexCleanups = map[string]string{
 	"430_channel_outbound_message_binding_index":                "idx_channel_outbound_message_binding_route",
 	"438_agent_runtime_online_last_seen_index":                  "idx_agent_runtime_online_last_seen",
 	"439_agent_runtime_offline_last_seen_index":                 "idx_agent_runtime_offline_last_seen",
-	"440_agent_task_queue_agent_created_at_keyset_index":        "idx_agent_task_queue_agent_created_at_keyset",
 }
 
 // concurrentDownIndexCleanups covers every migration whose down direction

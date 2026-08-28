@@ -130,14 +130,10 @@ type ListAgentTaskUsageRow struct {
 	CostUsdTicks     pgtype.Int8 `json:"cost_usd_ticks"`
 }
 
-// Per-(task, provider, model) usage rows for a bounded slice of one agent's
+// Per-(task, provider, model) usage rows for one agent's explicitly requested
 // task history. ListAgentTasks is already access-gated before this query runs;
 // the agent predicate preserves that authorization boundary, while task_ids
-// keeps usage hydration aligned with the exact filtered/limited response
-// without an N+1 query per returned task.
-//
-// Uses idx_agent_task_queue_agent_id_keyset (migration 278) plus the
-// task_usage task_id index (migration 032).
+// keeps hydration aligned with the exact response without an N+1 query.
 func (q *Queries) ListAgentTaskUsage(ctx context.Context, arg ListAgentTaskUsageParams) ([]ListAgentTaskUsageRow, error) {
 	rows, err := q.db.Query(ctx, listAgentTaskUsage, arg.AgentID, arg.TaskIds)
 	if err != nil {

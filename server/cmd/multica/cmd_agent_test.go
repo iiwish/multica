@@ -36,71 +36,11 @@ func freshAgentEnvSetCmd() *cobra.Command {
 func newAgentTasksTestCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "tasks"}
 	cmd.Flags().String("output", "json", "")
-	cmd.Flags().String("since", "", "")
-	cmd.Flags().String("until", "", "")
-	cmd.Flags().Int("limit", 0, "")
 	cmd.Flags().String("profile", "", "")
 	return cmd
 }
 
-func TestRunAgentTasksFetchesAllPagesByDefault(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("MULTICA_AGENT_ID", "")
-	t.Setenv("MULTICA_TASK_ID", "")
-
-	requests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		if got := r.URL.Query().Get("limit"); got != "1000" {
-			t.Errorf("request %d limit = %q, want 1000", requests, got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch requests {
-		case 1:
-			if got := r.URL.Query().Get("before"); got != "" {
-				t.Errorf("first request before = %q", got)
-			}
-			w.Header().Set(agentTaskHasMoreHeader, "true")
-			w.Header().Set(agentTaskNextBeforeHeader, "2026-08-27T02:00:00Z")
-			w.Header().Set(agentTaskNextBeforeIDHeader, "task-2")
-			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"id": "task-1", "created_at": "2026-08-27T03:00:00Z"},
-				{"id": "task-2", "created_at": "2026-08-27T02:00:00Z"},
-			})
-		case 2:
-			if got := r.URL.Query().Get("before"); got != "2026-08-27T02:00:00Z" {
-				t.Errorf("second request before = %q", got)
-			}
-			if got := r.URL.Query().Get("before_id"); got != "task-2" {
-				t.Errorf("second request before_id = %q", got)
-			}
-			w.Header().Set(agentTaskHasMoreHeader, "false")
-			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"id": "task-3", "created_at": "2026-08-27T01:00:00Z"},
-			})
-		default:
-			t.Fatalf("unexpected request %d", requests)
-		}
-	}))
-	defer srv.Close()
-	setCLITestServerEnv(t, srv.URL)
-
-	cmd := newAgentTasksTestCmd()
-	out, err := captureStdout(t, func() error { return runAgentTasks(cmd, []string{"agent-123"}) })
-	if err != nil {
-		t.Fatalf("runAgentTasks: %v", err)
-	}
-	if requests != 2 {
-		t.Fatalf("requests = %d, want 2", requests)
-	}
-	for _, id := range []string{"task-1", "task-2", "task-3"} {
-		if !strings.Contains(out, `"id": "`+id+`"`) {
-			t.Errorf("output missing %s: %s", id, out)
-		}
-	}
-}
-
-func TestRunAgentTasksSendsBoundedQuery(t *testing.T) {
+func TestRunAgentTasksRequestsUsageForJSON(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("MULTICA_AGENT_ID", "")
 	t.Setenv("MULTICA_TASK_ID", "")
@@ -109,14 +49,39 @@ func TestRunAgentTasksSendsBoundedQuery(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/agents/agent-123/tasks" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		if got := r.URL.Query().Get("since"); got != "2026-08-27T01:00:00Z" {
-			t.Errorf("since = %q", got)
+		if got := r.URL.Query().Get("include_usage"); got != "true" {
+			t.Errorf("include_usage = %q, want true for JSON output", got)
 		}
-		if got := r.URL.Query().Get("until"); got != "2026-08-28T01:00:00Z" {
-			t.Errorf("until = %q", got)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"id":    "task-1",
+			"usage": []map[string]any{{"provider": "openai", "input_tokens": 12}},
+		}})
+	}))
+	defer srv.Close()
+	setCLITestServerEnv(t, srv.URL)
+
+	cmd := newAgentTasksTestCmd()
+	out, err := captureStdout(t, func() error { return runAgentTasks(cmd, []string{"agent-123"}) })
+	if err != nil {
+		t.Fatalf("runAgentTasks: %v", err)
+	}
+	if !strings.Contains(out, `"input_tokens": 12`) {
+		t.Fatalf("JSON output missing usage: %s", out)
+	}
+}
+
+func TestRunAgentTasksKeepsTableRequestLightweight(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("MULTICA_AGENT_ID", "")
+	t.Setenv("MULTICA_TASK_ID", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/agents/agent-123/tasks" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		if got := r.URL.Query().Get("limit"); got != "25" {
-			t.Errorf("limit = %q", got)
+		if got := r.URL.Query().Get("include_usage"); got != "" {
+			t.Errorf("include_usage = %q, want omitted for table output", got)
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "task-1", "status": "completed"}})
 	}))
@@ -124,63 +89,16 @@ func TestRunAgentTasksSendsBoundedQuery(t *testing.T) {
 	setCLITestServerEnv(t, srv.URL)
 
 	cmd := newAgentTasksTestCmd()
-	for name, value := range map[string]string{
-		"since": "2026-08-27T01:00:00Z",
-		"until": "2026-08-28T01:00:00Z",
-		"limit": "25",
-	} {
-		if err := cmd.Flags().Set(name, value); err != nil {
-			t.Fatal(err)
-		}
+	if err := cmd.Flags().Set("output", "table"); err != nil {
+		t.Fatal(err)
 	}
 
 	out, err := captureStdout(t, func() error { return runAgentTasks(cmd, []string{"agent-123"}) })
 	if err != nil {
 		t.Fatalf("runAgentTasks: %v", err)
 	}
-	if !strings.Contains(out, `"id": "task-1"`) {
+	if !strings.Contains(out, "task-1") {
 		t.Fatalf("output = %s", out)
-	}
-}
-
-func TestAgentTasksRejectsInvalidBoundsBeforeRequest(t *testing.T) {
-	t.Chdir(t.TempDir())
-	t.Setenv("MULTICA_AGENT_ID", "")
-	t.Setenv("MULTICA_TASK_ID", "")
-
-	requests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		http.Error(w, "unexpected request", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	setCLITestServerEnv(t, srv.URL)
-
-	tests := []struct {
-		name  string
-		flags map[string]string
-		want  string
-	}{
-		{"bad timestamp", map[string]string{"since": "yesterday"}, "--since must be an RFC3339 timestamp"},
-		{"reversed range", map[string]string{"since": "2026-08-28T02:00:00Z", "until": "2026-08-28T01:00:00Z"}, "--since must be earlier than --until"},
-		{"zero limit", map[string]string{"limit": "0"}, "--limit must be a positive integer"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd := newAgentTasksTestCmd()
-			for name, value := range tt.flags {
-				if err := cmd.Flags().Set(name, value); err != nil {
-					t.Fatal(err)
-				}
-			}
-			err := runAgentTasks(cmd, []string{"agent-123"})
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error = %v, want %q", err, tt.want)
-			}
-		})
-	}
-	if requests != 0 {
-		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 
