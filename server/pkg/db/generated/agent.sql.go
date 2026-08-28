@@ -5284,15 +5284,22 @@ SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, comp
 WHERE agent_id = $1
   AND ($2::timestamptz IS NULL OR created_at >= $2)
   AND ($3::timestamptz IS NULL OR created_at < $3)
+  AND (
+    $4::timestamptz IS NULL
+    OR created_at < $4
+    OR (created_at = $4 AND id < $5)
+  )
 ORDER BY created_at DESC, id DESC
-LIMIT $4
+LIMIT $6
 `
 
 type ListAgentTasksParams struct {
 	AgentID   pgtype.UUID        `json:"agent_id"`
 	Since     pgtype.Timestamptz `json:"since"`
 	Until     pgtype.Timestamptz `json:"until"`
-	LimitRows int32              `json:"limit_rows"`
+	Before    pgtype.Timestamptz `json:"before"`
+	BeforeID  pgtype.UUID        `json:"before_id"`
+	LimitRows pgtype.Int4        `json:"limit_rows"`
 }
 
 func (q *Queries) ListAgentTasks(ctx context.Context, arg ListAgentTasksParams) ([]AgentTaskQueue, error) {
@@ -5300,6 +5307,8 @@ func (q *Queries) ListAgentTasks(ctx context.Context, arg ListAgentTasksParams) 
 		arg.AgentID,
 		arg.Since,
 		arg.Until,
+		arg.Before,
+		arg.BeforeID,
 		arg.LimitRows,
 	)
 	if err != nil {

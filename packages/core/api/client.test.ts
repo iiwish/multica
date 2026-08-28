@@ -1072,6 +1072,66 @@ describe("ApiClient", () => {
     expect(tasks[2]?.usage?.[0]?.output_tokens).toBe(0);
   });
 
+  it("assembles agent task history from keyset pages", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { id: "task-1", status: "completed", created_at: "2026-08-27T03:00:00Z" },
+            { id: "task-2", status: "completed", created_at: "2026-08-27T02:00:00Z" },
+          ]),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Multica-Has-More": "true",
+              "X-Multica-Next-Before": "2026-08-27T02:00:00Z",
+              "X-Multica-Next-Before-ID": "task-2",
+            },
+          },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { id: "task-3", status: "completed", created_at: "2026-08-27T01:00:00Z" },
+          ]),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "X-Multica-Has-More": "false",
+            },
+          },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    const tasks = await client.listAgentTasks("agent-1");
+
+    expect(tasks.map((task) => task.id)).toEqual(["task-1", "task-2", "task-3"]);
+    expect(fetchMock.mock.calls.map(([request]) => request)).toEqual([
+      "https://api.example.test/api/agents/agent-1/tasks?limit=1000",
+      "https://api.example.test/api/agents/agent-1/tasks?limit=1000&before=2026-08-27T02%3A00%3A00Z&before_id=task-2",
+    ]);
+  });
+
+  it("falls back to an empty agent task history for a malformed response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ tasks: "not-an-array" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await expect(client.listAgentTasks("agent-1")).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the expected HTTP contract for autopilot endpoints", async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(
       new Response(JSON.stringify({ autopilots: [], runs: [], total: 0 }), {

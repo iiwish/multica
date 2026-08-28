@@ -39,6 +39,9 @@ const maxAgentDescriptionLength = 255
 
 const (
 	maxAgentTaskListLimit             = 1000
+	agentTaskHasMoreHeader            = "X-Multica-Has-More"
+	agentTaskNextBeforeHeader         = "X-Multica-Next-Before"
+	agentTaskNextBeforeIDHeader       = "X-Multica-Next-Before-ID"
 	maxAgentConversationStarters      = 3
 	maxAgentConversationStarterLabel  = 80
 	maxAgentConversationStarterLength = 4000
@@ -2468,7 +2471,7 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params, err := parseAgentTaskListParams(r, agent.ID)
+	params, pageLimit, err := parseAgentTaskListParams(r, agent.ID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -2478,6 +2481,16 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list agent tasks")
 		return
+	}
+	if pageLimit > 0 {
+		hasMore := len(tasks) > pageLimit
+		if hasMore {
+			tasks = tasks[:pageLimit]
+			last := tasks[len(tasks)-1]
+			w.Header().Set(agentTaskNextBeforeHeader, last.CreatedAt.Time.Format(time.RFC3339Nano))
+			w.Header().Set(agentTaskNextBeforeIDHeader, uuidToString(last.ID))
+		}
+		w.Header().Set(agentTaskHasMoreHeader, strconv.FormatBool(hasMore))
 	}
 
 	resp := make([]AgentTaskResponse, len(tasks))
@@ -2496,9 +2509,9 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func parseAgentTaskListParams(r *http.Request, agentID pgtype.UUID) (db.ListAgentTasksParams, error) {
+func parseAgentTaskListParams(r *http.Request, agentID pgtype.UUID) (db.ListAgentTasksParams, int, error) {
 	query := r.URL.Query()
-	params := db.ListAgentTasksParams{AgentID: agentID, LimitRows: maxAgentTaskListLimit}
+	params := db.ListAgentTasksParams{AgentID: agentID}
 
 	parseBound := func(name string) (pgtype.Timestamptz, error) {
 		raw := strings.TrimSpace(query.Get(name))
@@ -2515,25 +2528,43 @@ func parseAgentTaskListParams(r *http.Request, agentID pgtype.UUID) (db.ListAgen
 	var err error
 	params.Since, err = parseBound("since")
 	if err != nil {
-		return db.ListAgentTasksParams{}, err
+		return db.ListAgentTasksParams{}, 0, err
 	}
 	params.Until, err = parseBound("until")
 	if err != nil {
-		return db.ListAgentTasksParams{}, err
+		return db.ListAgentTasksParams{}, 0, err
 	}
 	if params.Since.Valid && params.Until.Valid && !params.Since.Time.Before(params.Until.Time) {
-		return db.ListAgentTasksParams{}, errors.New("since must be earlier than until")
+		return db.ListAgentTasksParams{}, 0, errors.New("since must be earlier than until")
 	}
 
+	beforeRaw := strings.TrimSpace(query.Get("before"))
+	beforeIDRaw := strings.TrimSpace(query.Get("before_id"))
+	if (beforeRaw == "") != (beforeIDRaw == "") {
+		return db.ListAgentTasksParams{}, 0, errors.New("before and before_id must be set together")
+	}
+	if beforeRaw != "" {
+		params.Before, err = parseBound("before")
+		if err != nil {
+			return db.ListAgentTasksParams{}, 0, err
+		}
+		params.BeforeID, err = util.ParseUUID(beforeIDRaw)
+		if err != nil {
+			return db.ListAgentTasksParams{}, 0, errors.New("before_id must be a UUID")
+		}
+	}
+
+	pageLimit := 0
 	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil || limit < 1 || limit > maxAgentTaskListLimit {
-			return db.ListAgentTasksParams{}, fmt.Errorf("limit must be between 1 and %d", maxAgentTaskListLimit)
+			return db.ListAgentTasksParams{}, 0, fmt.Errorf("limit must be between 1 and %d", maxAgentTaskListLimit)
 		}
-		params.LimitRows = int32(limit)
+		pageLimit = limit
+		params.LimitRows = pgtype.Int4{Int32: int32(limit + 1), Valid: true}
 	}
 
-	return params, nil
+	return params, pageLimit, nil
 }
 
 // AgentActivityBucket is one day-bucketed throughput sample for the

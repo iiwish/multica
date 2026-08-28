@@ -22,6 +22,12 @@ import (
 
 const maxAgentTaskListLimit = 1000
 
+const (
+	agentTaskHasMoreHeader      = "X-Multica-Has-More"
+	agentTaskNextBeforeHeader   = "X-Multica-Next-Before"
+	agentTaskNextBeforeIDHeader = "X-Multica-Next-Before-ID"
+)
+
 var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Work with agents",
@@ -223,7 +229,7 @@ func init() {
 	agentTasksCmd.Flags().String("output", "table", "Output format: table or json")
 	agentTasksCmd.Flags().String("since", "", "Include tasks created at or after this RFC3339 timestamp")
 	agentTasksCmd.Flags().String("until", "", "Include tasks created before this RFC3339 timestamp")
-	agentTasksCmd.Flags().Int("limit", maxAgentTaskListLimit, "Maximum tasks to return (1-1000)")
+	agentTasksCmd.Flags().Int("limit", 0, "Maximum total tasks to return (positive; omitted fetches all tasks)")
 
 	// agent avatar
 	agentAvatarCmd.Flags().String("file", "", "Path to the avatar image file (required)")
@@ -881,22 +887,83 @@ func runAgentTasks(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := cli.APIContext(context.Background())
-	defer cancel()
-
-	query, err := agentTasksQuery(cmd)
+	query, totalLimit, err := agentTasksQuery(cmd)
 	if err != nil {
 		return err
 	}
 
-	path := "/api/agents/" + args[0] + "/tasks"
-	if encoded := query.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
+	tasks := make([]map[string]any, 0)
+	before := ""
+	beforeID := ""
+	previousPageFirstID := ""
+	for {
+		pageLimit := maxAgentTaskListLimit
+		if totalLimit > 0 && totalLimit-len(tasks) < pageLimit {
+			pageLimit = totalLimit - len(tasks)
+		}
 
-	var tasks []map[string]any
-	if err := client.GetJSON(ctx, path, &tasks); err != nil {
-		return fmt.Errorf("list agent tasks: %w", err)
+		pageQuery := url.Values{}
+		for key, values := range query {
+			pageQuery[key] = append([]string(nil), values...)
+		}
+		pageQuery.Set("limit", strconv.Itoa(pageLimit))
+		if before != "" {
+			pageQuery.Set("before", before)
+			pageQuery.Set("before_id", beforeID)
+		}
+
+		path := "/api/agents/" + args[0] + "/tasks?" + pageQuery.Encode()
+		var page []map[string]any
+		ctx, cancel := cli.APIContext(context.Background())
+		headers, requestErr := client.GetJSONWithHeaders(ctx, path, &page)
+		cancel()
+		if requestErr != nil {
+			return fmt.Errorf("list agent tasks: %w", requestErr)
+		}
+
+		// An older backend may ignore both the limit and cursor. If an exact
+		// page repeats, keep the complete first response instead of appending
+		// duplicates forever.
+		firstID := ""
+		if len(page) > 0 {
+			firstID = strVal(page[0], "id")
+		}
+		if before != "" && headers.Get(agentTaskHasMoreHeader) == "" && firstID != "" && firstID == previousPageFirstID {
+			break
+		}
+
+		if totalLimit > 0 && len(page) > totalLimit-len(tasks) {
+			page = page[:totalLimit-len(tasks)]
+		}
+		tasks = append(tasks, page...)
+		if totalLimit > 0 && len(tasks) >= totalLimit {
+			break
+		}
+
+		hasMoreHeader := strings.TrimSpace(headers.Get(agentTaskHasMoreHeader))
+		if hasMoreHeader == "false" || len(page) == 0 {
+			break
+		}
+		if hasMoreHeader == "" && len(page) != pageLimit {
+			// Compatibility with an unpaginated server: a short response is the
+			// final page; a response larger than the requested size is the full
+			// legacy result.
+			break
+		}
+
+		last := page[len(page)-1]
+		before = strings.TrimSpace(headers.Get(agentTaskNextBeforeHeader))
+		beforeID = strings.TrimSpace(headers.Get(agentTaskNextBeforeIDHeader))
+		if before == "" {
+			before = strVal(last, "created_at")
+		}
+		if beforeID == "" {
+			beforeID = strVal(last, "id")
+		}
+		if before == "" || beforeID == "" {
+			return errors.New("list agent tasks: paginated response is missing created_at or id cursor")
+		}
+		previousPageFirstID = firstID
 	}
 
 	output, _ := cmd.Flags().GetString("output")
@@ -918,7 +985,7 @@ func runAgentTasks(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func agentTasksQuery(cmd *cobra.Command) (url.Values, error) {
+func agentTasksQuery(cmd *cobra.Command) (url.Values, int, error) {
 	query := url.Values{}
 	since, _ := cmd.Flags().GetString("since")
 	until, _ := cmd.Flags().GetString("until")
@@ -938,25 +1005,22 @@ func agentTasksQuery(cmd *cobra.Command) (url.Values, error) {
 
 	sinceTime, err := parseBound("since", since)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	untilTime, err := parseBound("until", until)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if !sinceTime.IsZero() && !untilTime.IsZero() && !sinceTime.Before(untilTime) {
-		return nil, errors.New("--since must be earlier than --until")
+		return nil, 0, errors.New("--since must be earlier than --until")
 	}
 
 	limit, _ := cmd.Flags().GetInt("limit")
-	if cmd.Flags().Changed("limit") {
-		if limit < 1 || limit > 1000 {
-			return nil, errors.New("--limit must be between 1 and 1000")
-		}
-		query.Set("limit", strconv.Itoa(limit))
+	if cmd.Flags().Changed("limit") && limit < 1 {
+		return nil, 0, errors.New("--limit must be a positive integer")
 	}
 
-	return query, nil
+	return query, limit, nil
 }
 
 func runAgentAvatar(cmd *cobra.Command, args []string) error {

@@ -38,9 +38,66 @@ func newAgentTasksTestCmd() *cobra.Command {
 	cmd.Flags().String("output", "json", "")
 	cmd.Flags().String("since", "", "")
 	cmd.Flags().String("until", "", "")
-	cmd.Flags().Int("limit", maxAgentTaskListLimit, "")
+	cmd.Flags().Int("limit", 0, "")
 	cmd.Flags().String("profile", "", "")
 	return cmd
+}
+
+func TestRunAgentTasksFetchesAllPagesByDefault(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("MULTICA_AGENT_ID", "")
+	t.Setenv("MULTICA_TASK_ID", "")
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("limit"); got != "1000" {
+			t.Errorf("request %d limit = %q, want 1000", requests, got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			if got := r.URL.Query().Get("before"); got != "" {
+				t.Errorf("first request before = %q", got)
+			}
+			w.Header().Set(agentTaskHasMoreHeader, "true")
+			w.Header().Set(agentTaskNextBeforeHeader, "2026-08-27T02:00:00Z")
+			w.Header().Set(agentTaskNextBeforeIDHeader, "task-2")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": "task-1", "created_at": "2026-08-27T03:00:00Z"},
+				{"id": "task-2", "created_at": "2026-08-27T02:00:00Z"},
+			})
+		case 2:
+			if got := r.URL.Query().Get("before"); got != "2026-08-27T02:00:00Z" {
+				t.Errorf("second request before = %q", got)
+			}
+			if got := r.URL.Query().Get("before_id"); got != "task-2" {
+				t.Errorf("second request before_id = %q", got)
+			}
+			w.Header().Set(agentTaskHasMoreHeader, "false")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": "task-3", "created_at": "2026-08-27T01:00:00Z"},
+			})
+		default:
+			t.Fatalf("unexpected request %d", requests)
+		}
+	}))
+	defer srv.Close()
+	setCLITestServerEnv(t, srv.URL)
+
+	cmd := newAgentTasksTestCmd()
+	out, err := captureStdout(t, func() error { return runAgentTasks(cmd, []string{"agent-123"}) })
+	if err != nil {
+		t.Fatalf("runAgentTasks: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	for _, id := range []string{"task-1", "task-2", "task-3"} {
+		if !strings.Contains(out, `"id": "`+id+`"`) {
+			t.Errorf("output missing %s: %s", id, out)
+		}
+	}
 }
 
 func TestRunAgentTasksSendsBoundedQuery(t *testing.T) {
@@ -106,7 +163,7 @@ func TestAgentTasksRejectsInvalidBoundsBeforeRequest(t *testing.T) {
 	}{
 		{"bad timestamp", map[string]string{"since": "yesterday"}, "--since must be an RFC3339 timestamp"},
 		{"reversed range", map[string]string{"since": "2026-08-28T02:00:00Z", "until": "2026-08-28T01:00:00Z"}, "--since must be earlier than --until"},
-		{"zero limit", map[string]string{"limit": "0"}, "--limit must be between 1 and 1000"},
+		{"zero limit", map[string]string{"limit": "0"}, "--limit must be a positive integer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

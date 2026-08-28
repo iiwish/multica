@@ -123,10 +123,11 @@ export const agentTasksKeys = {
     [...agentTasksKeys.all(wsId), agentId] as const,
 };
 
-// All tasks for a single agent (the agent detail page consumer). Powers both
-// the inspector's 7-day throughput stats and the Tasks tab list — shared so
-// they don't fetch twice. WS task events invalidate this via the existing
-// task-prefix invalidation in useRealtimeSync.
+// All tasks for a single agent (the agent detail page consumer). The API
+// client assembles bounded keyset pages into this full-history result. It
+// powers both the inspector's 7-day throughput stats and the Tasks tab list,
+// shared so they don't fetch twice. WS task events invalidate this via the
+// existing task-prefix invalidation in useRealtimeSync.
 export function agentTasksOptions(wsId: string, agentId: string) {
   return queryOptions({
     queryKey: agentTasksKeys.detail(wsId, agentId),

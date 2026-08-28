@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
+	"net/url"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,16 +90,8 @@ func TestListAgentTasksHydratesUsage(t *testing.T) {
 
 	req := newRequest(http.MethodGet, "/api/agents/"+agentID+"/tasks", nil)
 	req = withURLParam(req, "id", agentID)
-	w := httptest.NewRecorder()
-	testHandler.ListAgentTasks(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
 	var resp []AgentTaskResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode task list: %v", err)
-	}
+	w := testutil.Call(t, testHandler.ListAgentTasks, req).Want(http.StatusOK).JSON(&resp)
 
 	byID := make(map[string]AgentTaskResponse, len(resp))
 	for _, task := range resp {
@@ -200,16 +195,8 @@ func TestListAgentTasksFiltersAndLimitsUsageScope(t *testing.T) {
 
 	req := newRequest(http.MethodGet, "/api/agents/"+agentID+"/tasks?since=2026-08-27T01%3A00%3A00Z&until=2026-08-27T03%3A00%3A00Z&limit=1", nil)
 	req = withURLParam(req, "id", agentID)
-	w := httptest.NewRecorder()
-	testHandler.ListAgentTasks(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
 	var resp []AgentTaskResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode filtered task list: %v", err)
-	}
+	testutil.Call(t, testHandler.ListAgentTasks, req).Want(http.StatusOK).JSON(&resp)
 	if len(resp) != 1 || resp[0].ID != matchingTask {
 		t.Fatalf("filtered tasks = %+v, want only %s", resp, matchingTask)
 	}
@@ -218,13 +205,69 @@ func TestListAgentTasksFiltersAndLimitsUsageScope(t *testing.T) {
 	}
 }
 
+func TestListAgentTasksPaginatesEqualCreatedAtWithoutSkipping(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+
+	agentID := createHandlerTestAgent(t, "AgentTaskPagination", []byte("[]"))
+	taskIDs := make([]string, 0, 3)
+	for range 3 {
+		taskID := dbfx.Task(t, agentID, testutil.Cols{
+			"runtime_id": handlerTestRuntimeID(t),
+			"status":     "completed",
+		})
+		if _, err := testPool.Exec(context.Background(), `UPDATE agent_task_queue SET created_at = '2026-08-27T02:00:00Z'::timestamptz WHERE id = $1`, taskID); err != nil {
+			t.Fatalf("set task created_at: %v", err)
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+
+	want := append([]string(nil), taskIDs...)
+	sort.Sort(sort.Reverse(sort.StringSlice(want)))
+	got := make([]string, 0, len(taskIDs))
+	query := "limit=1"
+	for page := range len(taskIDs) {
+		req := newRequest(http.MethodGet, "/api/agents/"+agentID+"/tasks?"+query, nil)
+		req = withURLParam(req, "id", agentID)
+		var tasks []AgentTaskResponse
+		resp := testutil.Call(t, testHandler.ListAgentTasks, req).Want(http.StatusOK).JSON(&tasks)
+		if len(tasks) != 1 {
+			t.Fatalf("page %d tasks = %d, want 1: %+v", page+1, len(tasks), tasks)
+		}
+		got = append(got, tasks[0].ID)
+
+		hasMore := page < len(taskIDs)-1
+		if gotHeader := resp.Header().Get(agentTaskHasMoreHeader); gotHeader != strconv.FormatBool(hasMore) {
+			t.Fatalf("page %d %s = %q, want %t", page+1, agentTaskHasMoreHeader, gotHeader, hasMore)
+		}
+		if !hasMore {
+			continue
+		}
+		before := resp.Header().Get(agentTaskNextBeforeHeader)
+		beforeID := resp.Header().Get(agentTaskNextBeforeIDHeader)
+		if before == "" || beforeID == "" {
+			t.Fatalf("page %d missing pagination cursor headers", page+1)
+		}
+		query = url.Values{
+			"limit":     {"1"},
+			"before":    {before},
+			"before_id": {beforeID},
+		}.Encode()
+	}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("paginated task ids = %v, want %v", got, want)
+	}
+}
+
 func TestParseAgentTaskListParamsRejectsInvalidBounds(t *testing.T) {
-	params, err := parseAgentTaskListParams(newRequest(http.MethodGet, "/api/agents/example/tasks", nil), pgtype.UUID{})
+	params, pageLimit, err := parseAgentTaskListParams(newRequest(http.MethodGet, "/api/agents/example/tasks", nil), pgtype.UUID{})
 	if err != nil {
 		t.Fatalf("default params: %v", err)
 	}
-	if params.LimitRows != maxAgentTaskListLimit {
-		t.Fatalf("default limit = %d, want %d", params.LimitRows, maxAgentTaskListLimit)
+	if params.LimitRows.Valid || pageLimit != 0 {
+		t.Fatalf("default pagination = (%+v, %d), want unbounded", params.LimitRows, pageLimit)
 	}
 
 	tests := []struct {
@@ -234,13 +277,16 @@ func TestParseAgentTaskListParamsRejectsInvalidBounds(t *testing.T) {
 		{"since=not-a-time", "since must be an RFC3339 timestamp"},
 		{"until=not-a-time", "until must be an RFC3339 timestamp"},
 		{"since=2026-08-28T02%3A00%3A00Z&until=2026-08-28T01%3A00%3A00Z", "since must be earlier than until"},
+		{"before=2026-08-28T02%3A00%3A00Z", "before and before_id must be set together"},
+		{"before_id=00000000-0000-0000-0000-000000000001", "before and before_id must be set together"},
+		{"before=2026-08-28T02%3A00%3A00Z&before_id=not-a-uuid", "before_id must be a UUID"},
 		{"limit=0", "limit must be between 1 and 1000"},
 		{"limit=1001", "limit must be between 1 and 1000"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.query, func(t *testing.T) {
 			req := newRequest(http.MethodGet, "/api/agents/example/tasks?"+tt.query, nil)
-			_, err := parseAgentTaskListParams(req, pgtype.UUID{})
+			_, _, err := parseAgentTaskListParams(req, pgtype.UUID{})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
@@ -273,14 +319,14 @@ func TestListAgentTasksReturnsErrorWhenUsageLoadFails(t *testing.T) {
 	req = withURLParam(req, "id", agentID)
 	errorCtx, cancel := context.WithTimeout(req.Context(), 250*time.Millisecond)
 	req = req.WithContext(errorCtx)
-	w := httptest.NewRecorder()
-	testHandler.ListAgentTasks(w, req)
+	w := testutil.Call(t, testHandler.ListAgentTasks, req)
 	cancel()
 	if err := lockTx.Rollback(context.Background()); err != nil {
 		t.Fatalf("release controlled task usage lock: %v", err)
 	}
 
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "failed to list agent task usage") {
-		t.Fatalf("usage query failure status = %d, want 500 without empty-usage fallback: %s", w.Code, w.Body.String())
+	w.Want(http.StatusInternalServerError)
+	if !strings.Contains(w.Body.String(), "failed to list agent task usage") {
+		t.Fatalf("usage query failure should not fall back to empty usage: %s", w.Body.String())
 	}
 }

@@ -2331,7 +2331,53 @@ export class ApiClient {
   }
 
   async listAgentTasks(agentId: string): Promise<AgentTask[]> {
-    return this.fetch(`/api/agents/${agentId}/tasks`);
+    const pageSize = 1000;
+    const tasks: AgentTask[] = [];
+    let before = "";
+    let beforeId = "";
+    let previousPageFirstId = "";
+
+    for (;;) {
+      const query = new URLSearchParams({ limit: String(pageSize) });
+      if (before) {
+        query.set("before", before);
+        query.set("before_id", beforeId);
+      }
+
+      const path = `/api/agents/${agentId}/tasks?${query.toString()}`;
+      const res = await this.fetchRaw(path);
+      const raw: unknown = await res.json();
+      const page = parseWithFallback<AgentTask[]>(raw, AgentTaskListSchema, [], {
+        endpoint: "GET /api/agents/{id}/tasks",
+      });
+      const hasMoreHeader = res.headers.get("X-Multica-Has-More");
+
+      // Servers predating pagination may ignore the cursor. If an exact page
+      // repeats, retain the complete first response rather than duplicating it
+      // forever.
+      if (
+        before &&
+        hasMoreHeader === null &&
+        page[0]?.id &&
+        page[0].id === previousPageFirstId
+      ) {
+        break;
+      }
+
+      tasks.push(...page);
+      if (hasMoreHeader === "false" || page.length === 0) break;
+      if (hasMoreHeader === null && page.length !== pageSize) break;
+
+      const last = page[page.length - 1];
+      before = res.headers.get("X-Multica-Next-Before")?.trim() || last?.created_at || "";
+      beforeId = res.headers.get("X-Multica-Next-Before-ID")?.trim() || last?.id || "";
+      if (!before || !beforeId) {
+        throw new Error("Paginated agent task response is missing its cursor");
+      }
+      previousPageFirstId = page[0]?.id ?? "";
+    }
+
+    return tasks;
   }
 
   // Workspace-scoped agent task snapshot: every active task

@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_agent_task_queue_agent_created_at_keyset;
