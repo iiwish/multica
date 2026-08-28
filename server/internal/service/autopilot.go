@@ -1887,6 +1887,12 @@ func normalizeIssueTitleTemplateValue(value string) string {
 		if unicode.IsControl(r) {
 			return ' '
 		}
+		// Unicode format controls are not covered by IsControl. Strip them so
+		// untrusted webhook text cannot visually reorder a title with bidi
+		// overrides or create invisible dedup keys with zero-width characters.
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
 		return r
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")

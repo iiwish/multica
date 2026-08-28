@@ -398,6 +398,26 @@ func TestInterpolateTemplate_ControlCharactersDoNotReachTitle(t *testing.T) {
 	}
 }
 
+func TestInterpolateTemplate_FormatControlsDoNotReachTitle(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{
+		IssueTitleTemplate: pgtype.Text{String: "{{payload.title}}", Valid: true},
+	}
+	run := db.AutopilotRun{
+		Source:         "webhook",
+		TriggerPayload: []byte(`{"event":"demo.received","eventPayload":{"title":"safe\u202eevil\u2066\u200btext"}}`),
+	}
+
+	got := s.interpolateTemplate(ap, run, "UTC")
+	want := "safeeviltext"
+	if got != want {
+		t.Fatalf("interpolateTemplate = %q, want %q", got, want)
+	}
+	if strings.IndexFunc(got, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) >= 0 {
+		t.Fatalf("rendered title contains a Unicode format control: %q", got)
+	}
+}
+
 func TestInterpolateTemplate_EmptyDynamicTitleFallsBackToAutopilotTitle(t *testing.T) {
 	s := &AutopilotService{}
 	ap := db.Autopilot{
@@ -439,6 +459,9 @@ func FuzzInterpolateTemplate_WebhookPayloadNeverLeaksInvalidOrControlText(f *tes
 		}
 		if strings.IndexFunc(got, unicode.IsControl) >= 0 {
 			t.Fatalf("rendered title contains a control character: %q", got)
+		}
+		if strings.IndexFunc(got, func(r rune) bool { return unicode.Is(unicode.Cf, r) }) >= 0 {
+			t.Fatalf("rendered title contains a Unicode format control: %q", got)
 		}
 		if runes := len([]rune(got)); runes > 3*issueTitleTemplateValueMaxRunes+32 {
 			t.Fatalf("rendered title unexpectedly large: %d runes", runes)
