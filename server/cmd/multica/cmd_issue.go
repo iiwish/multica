@@ -269,7 +269,9 @@ var issueCommentUpdateCmd = &cobra.Command{
 	Use:   "update <comment-id>",
 	Short: "Update a comment",
 	Long: "Update a comment you authored. Workspace owners and admins can update any comment.\n\n" +
-		"Changing the content uses the same agent-trigger behavior as editing the comment in the app.",
+		"Pass the revision returned by `multica issue comment list <issue-id> --output json`; " +
+		"the update is rejected if another editor changed the comment first. Changing the content " +
+		"uses the same agent-trigger behavior as editing the comment in the app.",
 	Args: exactArgs(1),
 	RunE: runIssueCommentUpdate,
 }
@@ -602,6 +604,7 @@ func init() {
 	issueCommentUpdateCmd.Flags().Bool("content-stdin", false, "Read new comment content from stdin (preserves multi-line content verbatim)")
 	issueCommentUpdateCmd.Flags().String("content-file", "", "Read new comment content from a UTF-8 file (preserves multi-line content verbatim; use this on Windows when stdin piping mangles non-ASCII bytes). The path must be inside the current working directory unless --allow-external-file is set.")
 	issueCommentUpdateCmd.Flags().Bool("allow-external-file", false, "Allow --content-file to read a path outside the current working directory. Off by default so a stale file from another run/environment can't be picked up (MUL-4252).")
+	issueCommentUpdateCmd.Flags().Int64("expected-revision", 0, "Current positive comment revision from `issue comment list --output json` (required; prevents overwriting a concurrent edit)")
 	issueCommentUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue comment resolve/unresolve
@@ -2086,6 +2089,11 @@ func runIssueCommentAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runIssueCommentUpdate(cmd *cobra.Command, args []string) error {
+	expectedRevision, _ := cmd.Flags().GetInt64("expected-revision")
+	if !cmd.Flags().Changed("expected-revision") || expectedRevision < 1 {
+		return fmt.Errorf("--expected-revision is required and must be a positive integer; read the current revision with `multica issue comment list <issue-id> --output json`")
+	}
+
 	content, hasContent, err := resolveTextFlag(cmd, "content")
 	if err != nil {
 		return err
@@ -2109,7 +2117,8 @@ func runIssueCommentUpdate(cmd *cobra.Command, args []string) error {
 	commentID := args[0]
 	var result map[string]any
 	if err := client.PutJSON(ctx, "/api/comments/"+url.PathEscape(commentID), map[string]any{
-		"content": content,
+		"content":           content,
+		"expected_revision": expectedRevision,
 	}, &result); err != nil {
 		return fmt.Errorf("update comment: %w", err)
 	}

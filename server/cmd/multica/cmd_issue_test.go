@@ -370,6 +370,7 @@ func newIssueCommentUpdateTestCmd() *cobra.Command {
 	cmd.Flags().Bool("content-stdin", false, "")
 	cmd.Flags().String("content-file", "", "")
 	cmd.Flags().Bool("allow-external-file", false, "")
+	cmd.Flags().Int64("expected-revision", 0, "")
 	cmd.Flags().String("output", "json", "")
 	return cmd
 }
@@ -385,7 +386,7 @@ func TestIssueCommentUpdateCommandRegistration(t *testing.T) {
 	if !strings.Contains(cmd.Long, "agent-trigger behavior") {
 		t.Fatalf("long help should disclose edit side effects, got %q", cmd.Long)
 	}
-	for _, name := range []string{"content", "content-stdin", "content-file", "allow-external-file", "output"} {
+	for _, name := range []string{"content", "content-stdin", "content-file", "allow-external-file", "expected-revision", "output"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("issue comment update missing --%s", name)
 		}
@@ -413,8 +414,8 @@ func TestRunIssueCommentUpdateSendsExpectedRequest(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if len(body) != 1 || body["content"] != "updated\ncomment" {
-			t.Fatalf("body = %#v, want content-only update", body)
+		if len(body) != 2 || body["content"] != "updated\ncomment" || body["expected_revision"] != float64(7) {
+			t.Fatalf("body = %#v, want content plus expected revision", body)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":      commentID,
@@ -426,6 +427,7 @@ func TestRunIssueCommentUpdateSendsExpectedRequest(t *testing.T) {
 
 	cmd := newIssueCommentUpdateTestCmd()
 	_ = cmd.Flags().Set("content", `updated\ncomment`)
+	_ = cmd.Flags().Set("expected-revision", "7")
 	stderr := captureStderr(t)
 	defer stderr.restore()
 	out, err := captureStdout(t, func() error {
@@ -471,6 +473,7 @@ func TestRunIssueCommentUpdateReadsContentFileAndHonorsTableOutput(t *testing.T)
 
 	cmd := newIssueCommentUpdateTestCmd()
 	_ = cmd.Flags().Set("content-file", "comment.md")
+	_ = cmd.Flags().Set("expected-revision", "4")
 	_ = cmd.Flags().Set("output", "table")
 	stderr := captureStderr(t)
 	defer stderr.restore()
@@ -500,12 +503,39 @@ func TestRunIssueCommentUpdateRejectsMissingContentBeforeRequest(t *testing.T) {
 	defer srv.Close()
 	setCLITestServerEnv(t, srv.URL)
 
-	err := runIssueCommentUpdate(newIssueCommentUpdateTestCmd(), []string{"comment-1"})
+	cmd := newIssueCommentUpdateTestCmd()
+	_ = cmd.Flags().Set("expected-revision", "1")
+	err := runIssueCommentUpdate(cmd, []string{"comment-1"})
 	if err == nil || err.Error() != "--content, --content-stdin, or --content-file is required" {
 		t.Fatalf("error = %v", err)
 	}
 	if requests != 0 {
 		t.Fatalf("requests = %d, want 0 for local validation failure", requests)
+	}
+}
+
+func TestRunIssueCommentUpdateRejectsMissingOrInvalidRevisionBeforeRequest(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	setCLITestServerEnv(t, srv.URL)
+
+	for _, revision := range []string{"", "0", "-1"} {
+		cmd := newIssueCommentUpdateTestCmd()
+		_ = cmd.Flags().Set("content", "updated")
+		if revision != "" {
+			_ = cmd.Flags().Set("expected-revision", revision)
+		}
+		err := runIssueCommentUpdate(cmd, []string{"comment-1"})
+		if err == nil || !strings.Contains(err.Error(), "--expected-revision is required and must be a positive integer") {
+			t.Fatalf("revision %q error = %v", revision, err)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0 for local revision validation failures", requests)
 	}
 }
 
@@ -519,6 +549,7 @@ func TestRunIssueCommentUpdateWrapsAPIError(t *testing.T) {
 
 	cmd := newIssueCommentUpdateTestCmd()
 	_ = cmd.Flags().Set("content", "not allowed")
+	_ = cmd.Flags().Set("expected-revision", "2")
 	err := runIssueCommentUpdate(cmd, []string{commentID})
 	if err == nil {
 		t.Fatal("expected API error")
