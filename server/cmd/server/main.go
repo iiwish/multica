@@ -551,15 +551,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Same posture for the Codex capacity retry budget: a value above the
-	// ceiling would let one capacity failure spawn an unbounded task chain, so
-	// the boot stops rather than quietly restoring the default.
-	codexCapacityRetries, err := parseCodexCapacityRetryCount(os.Getenv("MULTICA_CODEX_CAPACITY_RETRY_COUNT"))
-	if err != nil {
-		slog.Error("invalid MULTICA_CODEX_CAPACITY_RETRY_COUNT", "error", err)
-		os.Exit(1)
-	}
-
 	r, h := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
 		HTTPMetrics:         httpMetrics,
 		BusinessMetrics:     businessMetrics,
@@ -572,8 +563,6 @@ func main() {
 		FeatureFlags:        flags,
 		HeartbeatScheduler:  heartbeatScheduler,
 		LLMMaxRetries:       llmMaxRetries,
-
-		CodexCapacityRetryCount: &codexCapacityRetries,
 	})
 
 	srv := &http.Server{
@@ -615,8 +604,12 @@ func main() {
 	// hold queued work behind long-running tasks — e.g. a runtime with low
 	// task concurrency — raise the built-in 2h queued expiry without losing
 	// work to queued_expired failures.
-	go runRuntimeSweeper(sweepCtx, pool, queries, liveness, taskSvc, bus, runtimeReconnectGrace,
+	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace,
 		envDuration("MULTICA_TASK_QUEUED_TTL", defaultTaskQueuedTTL))
+	// Seven-day runtime retention does not share the 30-second liveness tick:
+	// its bounded transactions run independently once per hour, so a slow GC
+	// round cannot delay offline detection or task recovery.
+	go runRuntimeGCSweeper(sweepCtx, pool, queries, taskSvc.Metrics, bus)
 	// Source-context cleanup is object-store work, so it gets its own goroutine
 	// instead of a slot in the runtime sweep tick.
 	go runSourceContextSweeper(sweepCtx, taskSvc)

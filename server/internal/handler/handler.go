@@ -143,13 +143,6 @@ type Config struct {
 	// and cmd/server additionally fails the boot on an out-of-range value before
 	// one reaches this struct. See llm.Config.MaxRetries for the full semantics.
 	LLMMaxRetries *llm.RetryOverride
-	// CodexCapacityRetryCount is the deployment-wide number of additional
-	// immediate retries for Codex's exact selected-model capacity error. Zero
-	// disables only that dedicated policy. cmd/server enforces
-	// service.MaxCodexCapacityRetryCount as a hard maximum, failing the boot on
-	// an out-of-range value rather than correcting it, so the value reaching
-	// this struct is already validated.
-	CodexCapacityRetryCount int32
 	// ServerVersion is the build version of the running API binary (the same
 	// value main.go stamps via -X main.version and reports on /metrics).
 	// Surfaced through /api/config so self-hosted operators can confirm which
@@ -180,13 +173,9 @@ type DaemonPendingWorkNotifier interface {
 }
 
 type Handler struct {
-	Queries   *db.Queries
-	DB        dbExecutor
-	TxStarter txStarter
-	// issueTableWindowCache is initialized only on the request-local Handler
-	// copy used by a repeatable-read table request. It lets facets reuse one
-	// visible-id snapshot without adding mutable state to the shared Handler.
-	issueTableWindowCache  *issueTableWindowCache
+	Queries                *db.Queries
+	DB                     dbExecutor
+	TxStarter              txStarter
 	Hub                    *realtime.Hub
 	DaemonHub              *daemonws.Hub
 	DaemonProfileRefresh   RuntimeProfileRefreshNotifier
@@ -197,7 +186,7 @@ type Handler struct {
 	IssueService           *service.IssueService
 	AutopilotService       *service.AutopilotService
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
-	// preserves the self-hosted and pre-rollout behavior without extra reads.
+	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
 	// SeatCapacity executes Cloud's pre-purchased human-seat protocol. Nil or
 	// disabled preserves self-hosted behavior.
@@ -448,7 +437,6 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
 	taskSvc.Analytics = analyticsClient
 	taskSvc.SourceContextStorage = store
-	taskSvc.CodexCapacityRetryCount = cfg.CodexCapacityRetryCount
 	// Chat follow-up suggestions run through the same internal LLM layer that
 	// backs auto-titling. A deployment with no MULTICA_LLM_* configuration gets
 	// a disabled client, which turns the feature off rather than failing.
@@ -994,9 +982,6 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	// silently returns false for non-identifier strings, falling through to
 	// the UUID path below.
 	if issue, ok := h.resolveIssueByIdentifier(r.Context(), issueID, workspaceID); ok {
-		if !h.authorizeIssueWindow(w, r, issue.ID, issue.WorkspaceID, "direct") {
-			return db.Issue{}, false
-		}
 		return issue, true
 	}
 
@@ -1018,9 +1003,6 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, "issue not found")
-		return db.Issue{}, false
-	}
-	if !h.authorizeIssueWindow(w, r, issue.ID, issue.WorkspaceID, "direct") {
 		return db.Issue{}, false
 	}
 	return issue, true
@@ -1192,9 +1174,6 @@ func (h *Handler) loadInboxItemForUser(w http.ResponseWriter, r *http.Request, i
 
 	if item.RecipientType != "member" || uuidToString(item.RecipientID) != userID {
 		writeError(w, http.StatusNotFound, "inbox item not found")
-		return db.InboxItem{}, false
-	}
-	if item.IssueID.Valid && !h.authorizeIssueWindow(w, r, item.IssueID, item.WorkspaceID, "inbox") {
 		return db.InboxItem{}, false
 	}
 	return item, true

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -187,48 +186,6 @@ func parseTrustedProxies(raw string) []netip.Prefix {
 	return out
 }
 
-// codexCapacityRetryCount resolves the capacity retry budget the Handler runs
-// with. main() injects the validated value; NewRouter and tests leave it nil
-// and get the service default.
-func codexCapacityRetryCount(opts RouterOptions) int32 {
-	if opts.CodexCapacityRetryCount != nil {
-		return *opts.CodexCapacityRetryCount
-	}
-	return service.DefaultCodexCapacityRetryCount
-}
-
-// parseCodexCapacityRetryCount turns the raw MULTICA_CODEX_CAPACITY_RETRY_COUNT
-// value into the deployment-wide number of additional retries for Codex's exact
-// selected-model capacity error. An empty value yields the service default.
-//
-// Like parseLLMMaxRetries (MUL-6364) this returns an error instead of warning
-// and falling back to the default. The reason is stronger here: capacity
-// retries fire with zero delay, and each attempt writes a task row, launches a
-// runtime and calls the provider again, so an unnoticed value is not merely
-// "not what the operator asked for" — above the ceiling it is an effectively
-// unbounded task chain. Failing the boot makes a typo'd knob visible instead of
-// leaving a server that looks configured and is not.
-func parseCodexCapacityRetryCount(raw string) (int32, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return service.DefaultCodexCapacityRetryCount, nil
-	}
-	// Parsed at 64 bits so an out-of-int32 value reports the ceiling error
-	// rather than a shape error: "must be at most 20" tells the operator what
-	// to do, "must be an integer" does not.
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("must be an integer, got %q", raw)
-	}
-	if value < 0 {
-		return 0, fmt.Errorf("must not be negative, got %d", value)
-	}
-	if value > int64(service.MaxCodexCapacityRetryCount) {
-		return 0, fmt.Errorf("must be at most %d, got %d", service.MaxCodexCapacityRetryCount, value)
-	}
-	return int32(value), nil
-}
-
 // normalizeServerVersion maps the unstamped "dev" default (main.go's
 // `version` var, unchanged when the binary wasn't built with
 // -X main.version=<tag>) to an empty string. handler.Config.ServerVersion
@@ -281,14 +238,6 @@ type RouterOptions struct {
 	// any test that happened to have the variable set. nil means unset, which
 	// is what tests and NewRouter get.
 	LLMMaxRetries *llm.RetryOverride
-	// CodexCapacityRetryCount carries the parsed
-	// MULTICA_CODEX_CAPACITY_RETRY_COUNT budget, injected for the same reason as
-	// LLMMaxRetries above: a value over service.MaxCodexCapacityRetryCount must
-	// fail the boot, and only main() can exit. nil means unset, which is what
-	// tests and NewRouter get — they fall back to
-	// service.DefaultCodexCapacityRetryCount. A non-nil zero is meaningful and
-	// distinct from unset: it disables the dedicated capacity policy.
-	CodexCapacityRetryCount *int32
 }
 
 func buildChannelSupervisor(
@@ -458,7 +407,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		LLMBaseURL:               strings.TrimSpace(os.Getenv("MULTICA_LLM_BASE_URL")),
 		LLMDefaultModel:          strings.TrimSpace(os.Getenv("MULTICA_LLM_DEFAULT_MODEL")),
 		LLMMaxRetries:            opts.LLMMaxRetries,
-		CodexCapacityRetryCount:  codexCapacityRetryCount(opts),
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
@@ -481,6 +429,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		opts.BusinessMetrics.RecordEntitlementConfigError()
 	} else if entitlementClient.Enabled() {
 		h.Entitlements = entitlementClient
+		h.TaskService.Entitlements = entitlementClient
+		h.IssueService.Entitlements = entitlementClient
 		h.AutopilotService.Entitlements = entitlementClient
 		h.AutopilotService.QuotaMetrics = opts.BusinessMetrics
 	}
@@ -1823,17 +1773,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 		// Workspace subscriptions use the same cloud transport and Stripe
 		// webhook as the existing owner-credit billing surface, but every request
-		// is workspace-scoped. Entitlements, summary and prices are
-		// member-readable; Checkout, seat reconcile, and Portal mutations require
-		// owner/admin. The handlers also enforce
-		// billing_workspace_subscriptions so a route refactor cannot
+		// is workspace-scoped. Summary and prices are member-readable. Local role
+		// checks cheaply reject unauthorized writes; Cloud remains the final
+		// authority and validates every mutation before external writes. Handlers
+		// also enforce billing_workspace_subscriptions so a route refactor cannot
 		// accidentally bypass the rollout flag.
 		r.Route("/api/cloud-subscriptions", func(r chi.Router) {
 			r.Use(handler.RequireHumanActor)
-
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.RequireWorkspaceMember(queries))
-				r.Get("/entitlements", h.GetCloudWorkspaceEntitlements)
 				r.Get("/summary", h.GetCloudWorkspaceSubscriptionSummary)
 				r.Get("/prices", h.GetCloudWorkspaceSubscriptionPrices)
 			})
@@ -1856,7 +1804,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Issues
 			r.Route("/api/issues", func(r chi.Router) {
-				r.Get("/window-usage", h.GetIssueWindowUsage)
+				r.Get("/limit-usage", h.GetIssueLimitUsage)
 				r.Post("/table/groups", h.ListIssueTableGroups)
 				r.Post("/table/rows", h.ListIssueTableRows)
 				r.Post("/table/facets", h.ListIssueTableFacets)
