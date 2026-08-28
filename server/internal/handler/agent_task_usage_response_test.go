@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // TestListAgentTasksHydratesUsage pins the JSON contract used by
@@ -67,7 +69,10 @@ func TestListAgentTasksHydratesUsage(t *testing.T) {
 		"cost_usd_ticks":     5,
 	})
 
-	usageRows, err := testHandler.Queries.ListAgentTaskUsage(ctx, parseUUID(agentID))
+	usageRows, err := testHandler.Queries.ListAgentTaskUsage(ctx, db.ListAgentTaskUsageParams{
+		AgentID: parseUUID(agentID),
+		TaskIds: []pgtype.UUID{parseUUID(usageTask), parseUUID(noUsageTask)},
+	})
 	if err != nil {
 		t.Fatalf("list agent task usage: %v", err)
 	}
@@ -153,6 +158,93 @@ func TestListAgentTasksHydratesUsage(t *testing.T) {
 		if _, present := task["usage"]; present {
 			t.Errorf("no-usage task serialises a usage key: %v", task["usage"])
 		}
+	}
+}
+
+func TestListAgentTasksFiltersAndLimitsUsageScope(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+
+	agentID := createHandlerTestAgent(t, "AgentTaskUsageWindow", []byte("[]"))
+	newTask := func() string {
+		return dbfx.Task(t, agentID, testutil.Cols{
+			"runtime_id": handlerTestRuntimeID(t),
+			"status":     "completed",
+		})
+	}
+	oldTask := newTask()
+	matchingTask := newTask()
+	newTaskID := newTask()
+
+	createdAt := map[string]string{
+		oldTask:      "2026-08-27T00:00:00Z",
+		matchingTask: "2026-08-27T02:00:00Z",
+		newTaskID:    "2026-08-27T04:00:00Z",
+	}
+	for taskID, timestamp := range createdAt {
+		if _, err := testPool.Exec(context.Background(), `UPDATE agent_task_queue SET created_at = $2::timestamptz WHERE id = $1`, taskID, timestamp); err != nil {
+			t.Fatalf("set task created_at: %v", err)
+		}
+	}
+	for _, taskID := range []string{matchingTask, newTaskID} {
+		dbfx.Insert(t, "task_usage", testutil.Cols{
+			"task_id":           taskID,
+			"provider":          "openai",
+			"model":             "gpt-5.6-terra",
+			"input_tokens":      10,
+			"output_tokens":     5,
+			"cache_read_tokens": 2,
+		})
+	}
+
+	req := newRequest(http.MethodGet, "/api/agents/"+agentID+"/tasks?since=2026-08-27T01%3A00%3A00Z&until=2026-08-27T03%3A00%3A00Z&limit=1", nil)
+	req = withURLParam(req, "id", agentID)
+	w := httptest.NewRecorder()
+	testHandler.ListAgentTasks(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp []AgentTaskResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode filtered task list: %v", err)
+	}
+	if len(resp) != 1 || resp[0].ID != matchingTask {
+		t.Fatalf("filtered tasks = %+v, want only %s", resp, matchingTask)
+	}
+	if len(resp[0].Usage) != 1 || resp[0].Usage[0].InputTokens != 10 {
+		t.Fatalf("filtered task usage = %+v", resp[0].Usage)
+	}
+}
+
+func TestParseAgentTaskListParamsRejectsInvalidBounds(t *testing.T) {
+	params, err := parseAgentTaskListParams(newRequest(http.MethodGet, "/api/agents/example/tasks", nil), pgtype.UUID{})
+	if err != nil {
+		t.Fatalf("default params: %v", err)
+	}
+	if params.LimitRows != maxAgentTaskListLimit {
+		t.Fatalf("default limit = %d, want %d", params.LimitRows, maxAgentTaskListLimit)
+	}
+
+	tests := []struct {
+		query string
+		want  string
+	}{
+		{"since=not-a-time", "since must be an RFC3339 timestamp"},
+		{"until=not-a-time", "until must be an RFC3339 timestamp"},
+		{"since=2026-08-28T02%3A00%3A00Z&until=2026-08-28T01%3A00%3A00Z", "since must be earlier than until"},
+		{"limit=0", "limit must be between 1 and 1000"},
+		{"limit=1001", "limit must be between 1 and 1000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			req := newRequest(http.MethodGet, "/api/agents/example/tasks?"+tt.query, nil)
+			_, err := parseAgentTaskListParams(req, pgtype.UUID{})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

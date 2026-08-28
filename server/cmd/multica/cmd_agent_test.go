@@ -33,6 +33,100 @@ func freshAgentEnvSetCmd() *cobra.Command {
 	return c
 }
 
+func newAgentTasksTestCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "tasks"}
+	cmd.Flags().String("output", "json", "")
+	cmd.Flags().String("since", "", "")
+	cmd.Flags().String("until", "", "")
+	cmd.Flags().Int("limit", maxAgentTaskListLimit, "")
+	cmd.Flags().String("profile", "", "")
+	return cmd
+}
+
+func TestRunAgentTasksSendsBoundedQuery(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("MULTICA_AGENT_ID", "")
+	t.Setenv("MULTICA_TASK_ID", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/agents/agent-123/tasks" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("since"); got != "2026-08-27T01:00:00Z" {
+			t.Errorf("since = %q", got)
+		}
+		if got := r.URL.Query().Get("until"); got != "2026-08-28T01:00:00Z" {
+			t.Errorf("until = %q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "25" {
+			t.Errorf("limit = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "task-1", "status": "completed"}})
+	}))
+	defer srv.Close()
+	setCLITestServerEnv(t, srv.URL)
+
+	cmd := newAgentTasksTestCmd()
+	for name, value := range map[string]string{
+		"since": "2026-08-27T01:00:00Z",
+		"until": "2026-08-28T01:00:00Z",
+		"limit": "25",
+	} {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := captureStdout(t, func() error { return runAgentTasks(cmd, []string{"agent-123"}) })
+	if err != nil {
+		t.Fatalf("runAgentTasks: %v", err)
+	}
+	if !strings.Contains(out, `"id": "task-1"`) {
+		t.Fatalf("output = %s", out)
+	}
+}
+
+func TestAgentTasksRejectsInvalidBoundsBeforeRequest(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("MULTICA_AGENT_ID", "")
+	t.Setenv("MULTICA_TASK_ID", "")
+
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	setCLITestServerEnv(t, srv.URL)
+
+	tests := []struct {
+		name  string
+		flags map[string]string
+		want  string
+	}{
+		{"bad timestamp", map[string]string{"since": "yesterday"}, "--since must be an RFC3339 timestamp"},
+		{"reversed range", map[string]string{"since": "2026-08-28T02:00:00Z", "until": "2026-08-28T01:00:00Z"}, "--since must be earlier than --until"},
+		{"zero limit", map[string]string{"limit": "0"}, "--limit must be between 1 and 1000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newAgentTasksTestCmd()
+			for name, value := range tt.flags {
+				if err := cmd.Flags().Set(name, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := runAgentTasks(cmd, []string{"agent-123"})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
 func chdirWithDaemonTaskMarker(t *testing.T) {
 	t.Helper()
 

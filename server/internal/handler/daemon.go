@@ -4787,14 +4787,17 @@ func (h *Handler) hydrateTaskUsage(ctx context.Context, issueID pgtype.UUID, res
 
 // hydrateAgentTaskUsage attaches the same per-run accounting shape used by the
 // issue execution log to an agent's user-facing task history. One agent-scoped
-// query covers the whole response so `multica agent tasks --output json` does
-// not pay an N+1 cost as task history grows.
-func (h *Handler) hydrateAgentTaskUsage(ctx context.Context, agentID pgtype.UUID, resp []AgentTaskResponse) error {
+// query covers exactly the returned task IDs so filtered or limited requests do
+// not scan unrelated history and do not pay an N+1 cost.
+func (h *Handler) hydrateAgentTaskUsage(ctx context.Context, agentID pgtype.UUID, taskIDs []pgtype.UUID, resp []AgentTaskResponse) error {
 	if len(resp) == 0 {
 		return nil
 	}
 
-	rows, err := h.Queries.ListAgentTaskUsage(ctx, agentID)
+	rows, err := h.Queries.ListAgentTaskUsage(ctx, db.ListAgentTaskUsageParams{
+		AgentID: agentID,
+		TaskIds: taskIDs,
+	})
 	if err != nil {
 		return err
 	}

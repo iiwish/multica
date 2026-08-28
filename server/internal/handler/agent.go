@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -34,6 +36,8 @@ import (
 // in unicode code points (utf8.RuneCountInString), matching Postgres
 // char_length and the front-end's String.prototype.length-with-counter UX.
 const maxAgentDescriptionLength = 255
+
+const maxAgentTaskListLimit = 1000
 
 type AgentResponse struct {
 	ID          string `json:"id"`
@@ -2328,24 +2332,72 @@ func (h *Handler) ListAgentTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tasks, err := h.Queries.ListAgentTasks(r.Context(), agent.ID)
+	params, err := parseAgentTaskListParams(r, agent.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	tasks, err := h.Queries.ListAgentTasks(r.Context(), params)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list agent tasks")
 		return
 	}
 
 	resp := make([]AgentTaskResponse, len(tasks))
+	taskIDs := make([]pgtype.UUID, len(tasks))
 	for i, t := range tasks {
 		resp[i] = taskToResponse(t, workspaceID)
+		taskIDs[i] = t.ID
 	}
 	h.hydrateTaskAttributions(r.Context(), attributionsOf(resp))
-	if err := h.hydrateAgentTaskUsage(r.Context(), agent.ID, resp); err != nil {
+	if err := h.hydrateAgentTaskUsage(r.Context(), agent.ID, taskIDs, resp); err != nil {
 		slog.Warn("list agent task usage failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to list agent task usage")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func parseAgentTaskListParams(r *http.Request, agentID pgtype.UUID) (db.ListAgentTasksParams, error) {
+	query := r.URL.Query()
+	params := db.ListAgentTasksParams{AgentID: agentID, LimitRows: maxAgentTaskListLimit}
+
+	parseBound := func(name string) (pgtype.Timestamptz, error) {
+		raw := strings.TrimSpace(query.Get(name))
+		if raw == "" {
+			return pgtype.Timestamptz{}, nil
+		}
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return pgtype.Timestamptz{}, fmt.Errorf("%s must be an RFC3339 timestamp", name)
+		}
+		return pgtype.Timestamptz{Time: parsed, Valid: true}, nil
+	}
+
+	var err error
+	params.Since, err = parseBound("since")
+	if err != nil {
+		return db.ListAgentTasksParams{}, err
+	}
+	params.Until, err = parseBound("until")
+	if err != nil {
+		return db.ListAgentTasksParams{}, err
+	}
+	if params.Since.Valid && params.Until.Valid && !params.Since.Time.Before(params.Until.Time) {
+		return db.ListAgentTasksParams{}, errors.New("since must be earlier than until")
+	}
+
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > maxAgentTaskListLimit {
+			return db.ListAgentTasksParams{}, fmt.Errorf("limit must be between 1 and %d", maxAgentTaskListLimit)
+		}
+		params.LimitRows = int32(limit)
+	}
+
+	return params, nil
 }
 
 // AgentActivityBucket is one day-bucketed throughput sample for the

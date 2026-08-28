@@ -274,8 +274,11 @@ RETURNING *;
 
 -- name: ListAgentTasks :many
 SELECT * FROM agent_task_queue
-WHERE agent_id = $1
-ORDER BY created_at DESC;
+WHERE agent_id = sqlc.arg('agent_id')
+  AND (sqlc.narg('since')::timestamptz IS NULL OR created_at >= sqlc.narg('since'))
+  AND (sqlc.narg('until')::timestamptz IS NULL OR created_at < sqlc.narg('until'))
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg('limit_rows');
 
 -- name: ListActiveSiblingIssueTasks :many
 -- Claim-time context for agents that can work concurrently. Only tasks already

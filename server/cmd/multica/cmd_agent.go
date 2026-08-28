@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,8 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemon"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 )
+
+const maxAgentTaskListLimit = 1000
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
@@ -217,6 +221,9 @@ func init() {
 
 	// agent tasks
 	agentTasksCmd.Flags().String("output", "table", "Output format: table or json")
+	agentTasksCmd.Flags().String("since", "", "Include tasks created at or after this RFC3339 timestamp")
+	agentTasksCmd.Flags().String("until", "", "Include tasks created before this RFC3339 timestamp")
+	agentTasksCmd.Flags().Int("limit", maxAgentTaskListLimit, "Maximum tasks to return (1-1000)")
 
 	// agent avatar
 	agentAvatarCmd.Flags().String("file", "", "Path to the avatar image file (required)")
@@ -877,8 +884,18 @@ func runAgentTasks(cmd *cobra.Command, args []string) error {
 	ctx, cancel := cli.APIContext(context.Background())
 	defer cancel()
 
+	query, err := agentTasksQuery(cmd)
+	if err != nil {
+		return err
+	}
+
+	path := "/api/agents/" + args[0] + "/tasks"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+
 	var tasks []map[string]any
-	if err := client.GetJSON(ctx, "/api/agents/"+args[0]+"/tasks", &tasks); err != nil {
+	if err := client.GetJSON(ctx, path, &tasks); err != nil {
 		return fmt.Errorf("list agent tasks: %w", err)
 	}
 
@@ -899,6 +916,47 @@ func runAgentTasks(cmd *cobra.Command, args []string) error {
 	}
 	cli.PrintTable(os.Stdout, headers, rows)
 	return nil
+}
+
+func agentTasksQuery(cmd *cobra.Command) (url.Values, error) {
+	query := url.Values{}
+	since, _ := cmd.Flags().GetString("since")
+	until, _ := cmd.Flags().GetString("until")
+
+	parseBound := func(name, raw string) (time.Time, error) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return time.Time{}, nil
+		}
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("--%s must be an RFC3339 timestamp", name)
+		}
+		query.Set(name, raw)
+		return parsed, nil
+	}
+
+	sinceTime, err := parseBound("since", since)
+	if err != nil {
+		return nil, err
+	}
+	untilTime, err := parseBound("until", until)
+	if err != nil {
+		return nil, err
+	}
+	if !sinceTime.IsZero() && !untilTime.IsZero() && !sinceTime.Before(untilTime) {
+		return nil, errors.New("--since must be earlier than --until")
+	}
+
+	limit, _ := cmd.Flags().GetInt("limit")
+	if cmd.Flags().Changed("limit") {
+		if limit < 1 || limit > 1000 {
+			return nil, errors.New("--limit must be between 1 and 1000")
+		}
+		query.Set("limit", strconv.Itoa(limit))
+	}
+
+	return query, nil
 }
 
 func runAgentAvatar(cmd *cobra.Command, args []string) error {

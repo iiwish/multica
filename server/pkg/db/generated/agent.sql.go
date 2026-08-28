@@ -5070,11 +5070,26 @@ func (q *Queries) ListActiveTasksByIssue(ctx context.Context, issueID pgtype.UUI
 const listAgentTasks = `-- name: ListAgentTasks :many
 SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir FROM agent_task_queue
 WHERE agent_id = $1
-ORDER BY created_at DESC
+  AND ($2::timestamptz IS NULL OR created_at >= $2)
+  AND ($3::timestamptz IS NULL OR created_at < $3)
+ORDER BY created_at DESC, id DESC
+LIMIT $4
 `
 
-func (q *Queries) ListAgentTasks(ctx context.Context, agentID pgtype.UUID) ([]AgentTaskQueue, error) {
-	rows, err := q.db.Query(ctx, listAgentTasks, agentID)
+type ListAgentTasksParams struct {
+	AgentID   pgtype.UUID        `json:"agent_id"`
+	Since     pgtype.Timestamptz `json:"since"`
+	Until     pgtype.Timestamptz `json:"until"`
+	LimitRows int32              `json:"limit_rows"`
+}
+
+func (q *Queries) ListAgentTasks(ctx context.Context, arg ListAgentTasksParams) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, listAgentTasks,
+		arg.AgentID,
+		arg.Since,
+		arg.Until,
+		arg.LimitRows,
+	)
 	if err != nil {
 		return nil, err
 	}
