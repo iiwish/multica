@@ -760,7 +760,9 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 	}
 	if t.Result != nil {
 		json.Unmarshal(t.Result, &result)
-		json.Unmarshal(t.Result, &resultMetadata)
+		if err := json.Unmarshal(t.Result, &resultMetadata); err != nil {
+			resultMetadata.Warnings = nil
+		}
 	}
 	failureReason := ""
 	if t.FailureReason.Valid {
