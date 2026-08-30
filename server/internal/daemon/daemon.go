@@ -6803,8 +6803,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		codexVersion = resolvedVersion
 	}
 	openclawBin := ""
+	var openclawEnv map[string]string
 	if provider == "openclaw" {
 		openclawBin = entry.Path
+		openclawEnv = maps.Clone(entry.MiseEnv)
 	}
 	// Resolve any local_directory assignment again here so runTask can plumb
 	// LocalWorkDir into execenv. handleTask already validated + locked the
@@ -7030,6 +7032,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			CodexVersion:          codexVersion,
 			ResumeSessionID:       task.PriorSessionID,
 			OpenclawBin:           openclawBin,
+			OpenclawEnv:           openclawEnv,
 			McpConfig:             effectiveMcpConfig,
 			CursorMcpAuthSource:   cursorMcpAuthSource,
 			OpenclawGateway:       openclawGateway,
@@ -7080,6 +7083,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			Provider:              provider,
 			CodexVersion:          codexVersion,
 			OpenclawBin:           openclawBin,
+			OpenclawEnv:           openclawEnv,
 			McpConfig:             effectiveMcpConfig,
 			CursorMcpAuthSource:   cursorMcpAuthSource,
 			OpenclawGateway:       openclawGateway,

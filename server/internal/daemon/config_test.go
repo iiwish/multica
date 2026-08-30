@@ -219,6 +219,60 @@ func TestResolveAgentExecutablePath_RejectsMiseShimWhenWhichFails(t *testing.T) 
 	}
 }
 
+func TestProbeAgentCLIs_ResolvesLoginShellMiseContractsOncePerRound(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mise symlink dispatch is a Unix installation shape")
+	}
+
+	target := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write managed target: %v", err)
+	}
+	countPath := filepath.Join(t.TempDir(), "mise-calls")
+	manager := filepath.Join(t.TempDir(), "mise")
+	managerScript := `#!/bin/sh
+printf '%s\n' "$1" >> "$MULTICA_TEST_MISE_COUNT"
+case "$1:$2" in
+  which:claude) printf '%s\n' "$MULTICA_TEST_MISE_TARGET" ;;
+  env:--json) printf '{"PATH":"/usr/bin:/bin"}\n' ;;
+  *) exit 42 ;;
+esac
+`
+	if err := os.WriteFile(manager, []byte(managerScript), 0o755); err != nil {
+		t.Fatalf("write fake mise: %v", err)
+	}
+	shim := filepath.Join(t.TempDir(), "claude")
+	if err := os.Symlink(manager, shim); err != nil {
+		t.Fatalf("symlink mise dispatcher: %v", err)
+	}
+	t.Setenv("MULTICA_TEST_MISE_COUNT", countPath)
+	t.Setenv("MULTICA_TEST_MISE_TARGET", target)
+	t.Setenv("PATH", t.TempDir())
+
+	orig := resolveAgentsViaLoginShell
+	resolveAgentsViaLoginShell = func([]string) map[string]string {
+		return map[string]string{"claude": shim}
+	}
+	t.Cleanup(func() { resolveAgentsViaLoginShell = orig })
+	resetShellResolveCacheForTest(t)
+
+	entry, ok := probeAgentCLIs()["claude"]
+	wantTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("canonicalize managed target: %v", err)
+	}
+	if !ok || entry.Path != wantTarget {
+		t.Fatalf("probe result = %+v, present=%v, want managed claude target", entry, ok)
+	}
+	raw, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatalf("read mise invocation count: %v", err)
+	}
+	if calls := strings.Fields(string(raw)); !reflect.DeepEqual(calls, []string{"which", "env"}) {
+		t.Fatalf("mise resolution calls = %v, want one which/env pair for the whole probe round", calls)
+	}
+}
+
 func TestResolveAgentExecutablePath_CanonicalizesOrdinaryVersionTarget(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on Windows")

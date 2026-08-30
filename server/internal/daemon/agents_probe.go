@@ -128,7 +128,21 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	// is almost always at least one uninstalled provider to miss on. The TTL
 	// still lets a CLI installed into a login-shell-only PATH dir (nvm, fnm,
 	// ~/.local/bin via ~/.zshrc) be discovered without a restart (MUL-5439).
-	getShellResolved := cachedShellResolvedExecutables
+	// A probe checks many provider names. Resolve the login-shell snapshot's
+	// richer launch contracts at most once for this round: the path snapshot is
+	// cached, but mise path/environment resolution intentionally is not, and
+	// repeating it once per missing provider would multiply its two-second
+	// deadline across the whole provider list.
+	var (
+		shellResolvedOnce sync.Once
+		shellResolved     map[string]executableResolution
+	)
+	getShellResolved := func() map[string]executableResolution {
+		shellResolvedOnce.Do(func() {
+			shellResolved = cachedShellResolvedExecutables()
+		})
+		return shellResolved
+	}
 	probe := func(envVar, defaultCmd, modelEnv string) (AgentEntry, bool) {
 		cmd := envOrDefault(envVar, defaultCmd)
 		if resolved, err := resolveAgentExecutable(cmd); err == nil {
