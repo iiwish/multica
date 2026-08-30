@@ -61,6 +61,125 @@ func TestResolveAgentExecutablePath_PreservesDispatchShimName(t *testing.T) {
 	}
 }
 
+func TestResolveAgentExecutablePath_ResolvesMiseShimToManagedExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mise symlink dispatch is a Unix installation shape")
+	}
+
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "claude-2.1.220")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nprintf '2.1.220\\n'\n"), 0o755); err != nil {
+		t.Fatalf("write managed executable: %v", err)
+	}
+
+	managerDir := t.TempDir()
+	manager := filepath.Join(managerDir, "mise")
+	managerScript := `#!/bin/sh
+[ "$PWD" = "/" ] || { printf 'untrusted cwd: %s\n' "$PWD" >&2; exit 41; }
+[ "$1" = "which" ] && [ "$2" = "claude" ] || exit 42
+printf '%s\n' "$MULTICA_TEST_MISE_TARGET"
+`
+	if err := os.WriteFile(manager, []byte(managerScript), 0o755); err != nil {
+		t.Fatalf("write fake mise: %v", err)
+	}
+	t.Setenv("MULTICA_TEST_MISE_TARGET", target)
+
+	binDir := t.TempDir()
+	entrypoint := filepath.Join(binDir, "claude")
+	if err := os.Symlink(manager, entrypoint); err != nil {
+		t.Fatalf("symlink mise dispatcher: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	got, err := resolveAgentExecutablePath("claude")
+	if err != nil {
+		t.Fatalf("resolveAgentExecutablePath: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("resolve managed executable: %v", err)
+	}
+	if got != want {
+		t.Fatalf("resolved path = %q, want mise-managed executable %q", got, want)
+	}
+	output, err := exec.Command(got, "--version").Output()
+	if err != nil {
+		t.Fatalf("run resolved executable: %v", err)
+	}
+	if version := strings.TrimSpace(string(output)); version != "2.1.220" {
+		t.Fatalf("resolved executable version = %q, want 2.1.220", version)
+	}
+}
+
+func TestResolveAgentExecutablePath_PreservesExplicitMiseShimPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mise symlink dispatch is a Unix installation shape")
+	}
+
+	manager := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(manager, []byte("#!/bin/sh\nexit 99\n"), 0o755); err != nil {
+		t.Fatalf("write fake mise: %v", err)
+	}
+	entrypoint := filepath.Join(t.TempDir(), "claude")
+	if err := os.Symlink(manager, entrypoint); err != nil {
+		t.Fatalf("symlink mise dispatcher: %v", err)
+	}
+
+	got, err := resolveAgentExecutablePath(entrypoint)
+	if err != nil {
+		t.Fatalf("resolve explicit path: %v", err)
+	}
+	if got != entrypoint {
+		t.Fatalf("resolved explicit path = %q, want unchanged %q", got, entrypoint)
+	}
+}
+
+func TestProbeAgentCLIs_PreservesExplicitMiseShimPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mise symlink dispatch is a Unix installation shape")
+	}
+
+	manager := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(manager, []byte("#!/bin/sh\nexit 99\n"), 0o755); err != nil {
+		t.Fatalf("write fake mise: %v", err)
+	}
+	entrypoint := filepath.Join(t.TempDir(), "claude")
+	if err := os.Symlink(manager, entrypoint); err != nil {
+		t.Fatalf("symlink mise dispatcher: %v", err)
+	}
+	t.Setenv("MULTICA_CLAUDE_PATH", entrypoint)
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "unsupported-shell"))
+
+	entry, ok := probeAgentCLIs()["claude"]
+	if !ok {
+		t.Fatal("explicit MULTICA_CLAUDE_PATH was not discovered")
+	}
+	if entry.Path != entrypoint {
+		t.Fatalf("explicit MULTICA_CLAUDE_PATH resolved to %q, want unchanged %q", entry.Path, entrypoint)
+	}
+}
+
+func TestResolveAgentExecutablePath_RejectsMiseShimWhenWhichFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mise symlink dispatch is a Unix installation shape")
+	}
+
+	manager := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(manager, []byte("#!/bin/sh\nexit 43\n"), 0o755); err != nil {
+		t.Fatalf("write fake mise: %v", err)
+	}
+	binDir := t.TempDir()
+	if err := os.Symlink(manager, filepath.Join(binDir, "claude")); err != nil {
+		t.Fatalf("symlink mise dispatcher: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	if got, err := resolveAgentExecutablePath("claude"); err == nil {
+		t.Fatalf("resolved failed mise shim to %q, want discovery error", got)
+	}
+}
+
 func TestResolveAgentExecutablePath_CanonicalizesOrdinaryVersionTarget(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on Windows")
@@ -353,6 +472,52 @@ func TestResolveAgentsViaLoginShell_ResolvesViaInteractiveShell(t *testing.T) {
 	}
 	if resolved != wantCanonical {
 		t.Errorf("resolved = %q, want canonical %q", resolved, wantCanonical)
+	}
+}
+
+func TestResolveAgentsViaLoginShell_ResolvesMiseShimToManagedExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell not available on Windows")
+	}
+	sh := "/bin/sh"
+	if _, err := os.Stat(sh); err != nil {
+		t.Skipf("no /bin/sh available: %v", err)
+	}
+
+	target := filepath.Join(t.TempDir(), "claude-2.1.220")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write managed executable: %v", err)
+	}
+	manager := filepath.Join(t.TempDir(), "mise")
+	managerScript := `#!/bin/sh
+[ "$PWD" = "/" ] || exit 41
+[ "$1" = "which" ] && [ "$2" = "claude" ] || exit 42
+printf '%s\n' "$MULTICA_TEST_MISE_TARGET"
+`
+	if err := os.WriteFile(manager, []byte(managerScript), 0o755); err != nil {
+		t.Fatalf("write fake mise: %v", err)
+	}
+	t.Setenv("MULTICA_TEST_MISE_TARGET", target)
+
+	binDir := t.TempDir()
+	if err := os.Symlink(manager, filepath.Join(binDir, "claude")); err != nil {
+		t.Fatalf("symlink mise dispatcher: %v", err)
+	}
+	rc := filepath.Join(t.TempDir(), "sh.rc")
+	if err := os.WriteFile(rc, []byte("export PATH=\""+binDir+":$PATH\"\n"), 0o644); err != nil {
+		t.Fatalf("write rc: %v", err)
+	}
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("SHELL", sh)
+	t.Setenv("ENV", rc)
+
+	got := resolveAgentsViaLoginShell([]string{"claude"})["claude"]
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("resolve managed executable: %v", err)
+	}
+	if got != want {
+		t.Fatalf("login-shell resolved path = %q, want mise-managed executable %q", got, want)
 	}
 }
 

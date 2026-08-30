@@ -3,8 +3,12 @@
 package daemon
 
 import (
+	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestIsNameDispatchingAgentShim_RequiresExactDispatcherName(t *testing.T) {
@@ -28,5 +32,23 @@ func TestIsNameDispatchingAgentShim_RequiresExactDispatcherName(t *testing.T) {
 				t.Fatalf("isNameDispatchingAgentShim(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveMiseManagedExecutable_TimesOut(t *testing.T) {
+	mise := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(mise, []byte("#!/bin/sh\nsleep 5\n"), 0o755); err != nil {
+		t.Fatalf("write fake mise: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := resolveMiseManagedExecutable(ctx, mise, "claude")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("resolveMiseManagedExecutable error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timed-out mise which took %v, want at most 1s", elapsed)
 	}
 }

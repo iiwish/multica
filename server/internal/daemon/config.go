@@ -788,7 +788,7 @@ func resolveAgentExecutablePath(cmd string) (string, error) {
 			return unshadowed, nil
 		}
 	}
-	return discoveredExecutablePath(resolved), nil
+	return discoveredExecutablePath(resolved)
 }
 
 // agentExecutablePresent reports whether path currently resolves to a runnable
@@ -842,7 +842,7 @@ func lookPathExcludingMulticaHooks(cmd string) (string, error) {
 		}
 		candidate := filepath.Join(dir, cmd)
 		if isExecutableFile(candidate) {
-			return discoveredExecutablePath(candidate), nil
+			return discoveredExecutablePath(candidate)
 		}
 	}
 	return "", exec.ErrNotFound
@@ -1045,6 +1045,13 @@ var resolveAgentsViaLoginShell = func(names []string) map[string]string {
 		name, path := parts[0], strings.TrimSpace(parts[1])
 		if !filepath.IsAbs(path) {
 			continue
+		}
+		misePath, miseManaged, err := resolveMiseDiscoveredPath(path, name)
+		if err != nil {
+			continue
+		}
+		if miseManaged {
+			path = misePath
 		}
 		// Final reality check: the path the shell gave us must still be
 		// executable from the daemon's perspective right now. fnm

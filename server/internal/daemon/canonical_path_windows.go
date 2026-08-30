@@ -103,7 +103,11 @@ func canonicalPath(path string) (string, error) {
 	}
 }
 
-func discoveredExecutablePath(path string) string {
+func discoveredExecutablePath(path string) (string, error) {
+	return absoluteExecutablePath(path), nil
+}
+
+func absoluteExecutablePath(path string) string {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return path
@@ -111,8 +115,12 @@ func discoveredExecutablePath(path string) string {
 	return abs
 }
 
+func resolveMiseDiscoveredPath(path, _ string) (string, bool, error) {
+	return path, false, nil
+}
+
 func canonicalConfiguredExecutablePath(path string) string {
-	return discoveredExecutablePath(path)
+	return absoluteExecutablePath(path)
 }
 
 var executablePathForLaunch = executablePathForLaunchWindows
