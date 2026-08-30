@@ -76,6 +76,22 @@ func TestCommandCacheKeyIncludesEnvironmentDeterministically(t *testing.T) {
 	}
 }
 
+func TestConfigCommandAtCarriesImmutableRuntimeEnvironment(t *testing.T) {
+	runtimeEnv := map[string]string{"PATH": "/mise/node/bin:/usr/bin:/bin"}
+	cmd := (Config{
+		Env:        map[string]string{"MULTICA_AGENT_TOKEN": "task-secret"},
+		RuntimeEnv: runtimeEnv,
+	}).commandAt("/mise/agent")
+	runtimeEnv["PATH"] = "/mutated"
+
+	if got := cmd.Env["PATH"]; got != "/mise/node/bin:/usr/bin:/bin" {
+		t.Fatalf("command runtime PATH = %q, want immutable paired environment", got)
+	}
+	if _, leaked := cmd.Env["MULTICA_AGENT_TOKEN"]; leaked {
+		t.Fatal("command probe environment included the complete task environment")
+	}
+}
+
 // prefixIndex reports where the first token of want starts inside argv, or -1.
 func prefixIndex(argv, want []string) int {
 	for i := 0; i+len(want) <= len(argv); i++ {

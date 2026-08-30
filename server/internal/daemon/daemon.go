@@ -7503,6 +7503,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		LaunchPrefix:   profileFixedArgs,
 		CLIVersion:     resolvedVersion,
 		Env:            agentEnv,
+		RuntimeEnv:     maps.Clone(entry.MiseEnv),
 		Logger:         d.logger,
 		TaskID:         task.ID,
 		RuntimeID:      task.RuntimeID,

@@ -233,7 +233,7 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	// DSH is registered only when its Multica runtime profile is installed.
 	// A bare dsh binary is not enough: without the bundle it has no --stdio
 	// protocol and every task would fail after being advertised as healthy.
-	if e, ok := probe("MULTICA_DSH_PATH", "dsh", "MULTICA_DSH_MODEL"); ok && probeDshMulticaProfile(e.Path) {
+	if e, ok := probe("MULTICA_DSH_PATH", "dsh", "MULTICA_DSH_MODEL"); ok && probeDshMulticaProfile(e.Path, e.MiseEnv) {
 		agents["dsh"] = e
 	}
 	if e, ok := probe("MULTICA_KIRO_PATH", "kiro-cli", "MULTICA_KIRO_MODEL"); ok {
@@ -314,10 +314,16 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	return agents
 }
 
-func probeDshMulticaProfile(executablePath string) bool {
+func probeDshMulticaProfile(executablePath string, runtimeEnv map[string]string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, executablePath, "--profile", "multica", "--probe")
+	if len(runtimeEnv) > 0 {
+		cmd.Env = append([]string(nil), os.Environ()...)
+		for key, value := range runtimeEnv {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
 	cmd.WaitDelay = time.Second
 	output, err := cmd.Output()
 	if err != nil {

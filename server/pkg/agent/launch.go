@@ -349,11 +349,13 @@ func (c Command) String() string {
 }
 
 // commandAt pairs a resolved executable path with this runtime's launch
-// prefix. Backends call it after their own PATH resolution and default-binary
-// fallback, which is why the path is a parameter rather than read from
-// Config.ExecutablePath.
+// prefix and restricted execution environment. Backends call it after their
+// own PATH resolution and default-binary fallback, which is why the path is a
+// parameter rather than read from Config.ExecutablePath. Carrying RuntimeEnv
+// here keeps backend-owned probes (for example OpenClaw's version gate and
+// Antigravity's model guard) on the same command identity the daemon verified.
 func (c Config) commandAt(path string) Command {
-	return Command{Path: path, Prefix: c.LaunchPrefix, logger: c.Logger}
+	return (Command{Path: path, Prefix: c.LaunchPrefix, logger: c.Logger}).WithEnv(c.RuntimeEnv)
 }
 
 // logAgentCommand is the only boundary allowed to record runtime process
