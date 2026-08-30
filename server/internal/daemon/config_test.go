@@ -66,9 +66,13 @@ func TestResolveAgentExecutablePath_ResolvesMiseShimToManagedExecutable(t *testi
 		t.Skip("mise symlink dispatch is a Unix installation shape")
 	}
 
-	targetDir := t.TempDir()
-	target := filepath.Join(targetDir, "claude-2.1.220")
-	if err := os.WriteFile(target, []byte("#!/bin/sh\nprintf '2.1.220\\n'\n"), 0o755); err != nil {
+	runtimeBin := t.TempDir()
+	interpreter := filepath.Join(runtimeBin, "managed-node")
+	if err := os.WriteFile(interpreter, []byte("#!/bin/sh\nprintf '2.1.220\\n'\n"), 0o755); err != nil {
+		t.Fatalf("write managed interpreter: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "claude-2.1.220")
+	if err := os.WriteFile(target, []byte("#!/usr/bin/env managed-node\n"), 0o755); err != nil {
 		t.Fatalf("write managed executable: %v", err)
 	}
 
@@ -76,38 +80,70 @@ func TestResolveAgentExecutablePath_ResolvesMiseShimToManagedExecutable(t *testi
 	manager := filepath.Join(managerDir, "mise")
 	managerScript := `#!/bin/sh
 [ "$PWD" = "/" ] || { printf 'untrusted cwd: %s\n' "$PWD" >&2; exit 41; }
-[ "$1" = "which" ] && [ "$2" = "claude" ] || exit 42
-printf '%s\n' "$MULTICA_TEST_MISE_TARGET"
+[ -z "$MISE_CWD" ] || { printf 'inherited MISE_CWD: %s\n' "$MISE_CWD" >&2; exit 43; }
+case "$1:$2" in
+  which:claude) printf '%s\n' "$MULTICA_TEST_MISE_TARGET" ;;
+  env:--json) printf '{"PATH":"%s:%s:/usr/bin:/bin"}\n' "$MULTICA_TEST_MISE_RUNTIME_BIN" "$MULTICA_TEST_MISE_SHIM_BIN" ;;
+  *) exit 42 ;;
+esac
 `
 	if err := os.WriteFile(manager, []byte(managerScript), 0o755); err != nil {
 		t.Fatalf("write fake mise: %v", err)
 	}
 	t.Setenv("MULTICA_TEST_MISE_TARGET", target)
+	t.Setenv("MULTICA_TEST_MISE_RUNTIME_BIN", runtimeBin)
+	t.Setenv("MISE_CWD", t.TempDir())
 
 	binDir := t.TempDir()
 	entrypoint := filepath.Join(binDir, "claude")
 	if err := os.Symlink(manager, entrypoint); err != nil {
 		t.Fatalf("symlink mise dispatcher: %v", err)
 	}
+	if err := os.Symlink(manager, filepath.Join(binDir, "managed-node")); err != nil {
+		t.Fatalf("symlink hostile interpreter shim: %v", err)
+	}
+	t.Setenv("MULTICA_TEST_MISE_SHIM_BIN", binDir)
 	t.Setenv("PATH", binDir)
 
-	got, err := resolveAgentExecutablePath("claude")
+	resolved, err := resolveAgentExecutable("claude")
 	if err != nil {
-		t.Fatalf("resolveAgentExecutablePath: %v", err)
+		t.Fatalf("resolveAgentExecutable: %v", err)
 	}
 	want, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		t.Fatalf("resolve managed executable: %v", err)
 	}
-	if got != want {
-		t.Fatalf("resolved path = %q, want mise-managed executable %q", got, want)
+	if resolved.Path != want {
+		t.Fatalf("resolved path = %q, want mise-managed executable %q", resolved.Path, want)
 	}
-	output, err := exec.Command(got, "--version").Output()
+	if got := resolved.Env["PATH"]; !strings.HasPrefix(got, runtimeBin+string(os.PathListSeparator)) {
+		t.Fatalf("resolved PATH = %q, want managed runtime directory first", got)
+	}
+
+	// Negative control: pinning only the top-level npm script is insufficient.
+	// Its env shebang resolves managed-node back through the inherited mise shim.
+	if output, err := exec.Command(resolved.Path, "--version").CombinedOutput(); err == nil {
+		t.Fatalf("target unexpectedly ran without mise environment: %s", output)
+	}
+
+	cmd := exec.Command(resolved.Path, "--version")
+	cmd.Dir = t.TempDir()
+	cmd.Env = []string{"PATH=" + resolved.Env["PATH"]}
+	output, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("run resolved executable: %v", err)
+		t.Fatalf("run resolved executable with paired environment: %v", err)
 	}
 	if version := strings.TrimSpace(string(output)); version != "2.1.220" {
 		t.Fatalf("resolved executable version = %q, want 2.1.220", version)
+	}
+
+	t.Setenv("SHELL", filepath.Join(t.TempDir(), "unsupported-shell"))
+	entry, ok := probeAgentCLIs()["claude"]
+	if !ok {
+		t.Fatal("mise-managed claude was not included in agent discovery")
+	}
+	if entry.Path != resolved.Path || entry.MiseEnv["PATH"] != resolved.Env["PATH"] {
+		t.Fatalf("agent entry lost mise path/environment pairing: %+v", entry)
 	}
 }
 
@@ -157,6 +193,9 @@ func TestProbeAgentCLIs_PreservesExplicitMiseShimPath(t *testing.T) {
 	}
 	if entry.Path != entrypoint {
 		t.Fatalf("explicit MULTICA_CLAUDE_PATH resolved to %q, want unchanged %q", entry.Path, entrypoint)
+	}
+	if len(entry.MiseEnv) != 0 {
+		t.Fatalf("explicit MULTICA_CLAUDE_PATH unexpectedly gained mise environment: %v", entry.MiseEnv)
 	}
 }
 
@@ -475,7 +514,7 @@ func TestResolveAgentsViaLoginShell_ResolvesViaInteractiveShell(t *testing.T) {
 	}
 }
 
-func TestResolveAgentsViaLoginShell_ResolvesMiseShimToManagedExecutable(t *testing.T) {
+func TestLoginShellMiseResolution_PinsManagedExecutableAndEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell not available on Windows")
 	}
@@ -491,13 +530,17 @@ func TestResolveAgentsViaLoginShell_ResolvesMiseShimToManagedExecutable(t *testi
 	manager := filepath.Join(t.TempDir(), "mise")
 	managerScript := `#!/bin/sh
 [ "$PWD" = "/" ] || exit 41
-[ "$1" = "which" ] && [ "$2" = "claude" ] || exit 42
-printf '%s\n' "$MULTICA_TEST_MISE_TARGET"
+case "$1:$2" in
+  which:claude) printf '%s\n' "$MULTICA_TEST_MISE_TARGET" ;;
+  env:--json) printf '{"PATH":"%s:/usr/bin:/bin"}\n' "$MULTICA_TEST_MISE_RUNTIME_BIN" ;;
+  *) exit 42 ;;
+esac
 `
 	if err := os.WriteFile(manager, []byte(managerScript), 0o755); err != nil {
 		t.Fatalf("write fake mise: %v", err)
 	}
 	t.Setenv("MULTICA_TEST_MISE_TARGET", target)
+	t.Setenv("MULTICA_TEST_MISE_RUNTIME_BIN", filepath.Dir(target))
 
 	binDir := t.TempDir()
 	if err := os.Symlink(manager, filepath.Join(binDir, "claude")); err != nil {
@@ -511,13 +554,23 @@ printf '%s\n' "$MULTICA_TEST_MISE_TARGET"
 	t.Setenv("SHELL", sh)
 	t.Setenv("ENV", rc)
 
-	got := resolveAgentsViaLoginShell([]string{"claude"})["claude"]
+	shimPath := resolveAgentsViaLoginShell([]string{"claude"})["claude"]
+	resolved, managed, err := resolveMiseDiscoveredExecutable(shimPath, "claude")
+	if err != nil {
+		t.Fatalf("resolve login-shell mise shim: %v", err)
+	}
+	if !managed {
+		t.Fatal("login-shell mise shim was not recognized as mise-managed")
+	}
 	want, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		t.Fatalf("resolve managed executable: %v", err)
 	}
-	if got != want {
-		t.Fatalf("login-shell resolved path = %q, want mise-managed executable %q", got, want)
+	if resolved.Path != want {
+		t.Fatalf("login-shell resolved path = %q, want mise-managed executable %q", resolved.Path, want)
+	}
+	if resolved.Env["PATH"] == "" {
+		t.Fatal("login-shell mise resolution did not retain its toolset PATH")
 	}
 }
 

@@ -73,6 +73,23 @@ func cachedShellResolvedAgents() map[string]string {
 	return shellResolveCache
 }
 
+// cachedShellResolvedExecutables adds daemon-specific version-manager
+// resolution to the login shell's invocation paths. Keeping this outside the
+// shell cache preserves its cheap path-only contract while still pairing a
+// mise target with the environment selected from the trusted root.
+func cachedShellResolvedExecutables() map[string]executableResolution {
+	paths := cachedShellResolvedAgents()
+	resolved := make(map[string]executableResolution, len(paths))
+	for name, path := range paths {
+		entry, _, err := resolveMiseDiscoveredExecutable(path, name)
+		if err != nil {
+			continue
+		}
+		resolved[name] = entry
+	}
+	return resolved
+}
+
 // probeAgentCLIs discovers which built-in agent CLIs are installed on this
 // machine and returns one AgentEntry per provider that resolved.
 //
@@ -111,14 +128,15 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 	// is almost always at least one uninstalled provider to miss on. The TTL
 	// still lets a CLI installed into a login-shell-only PATH dir (nvm, fnm,
 	// ~/.local/bin via ~/.zshrc) be discovered without a restart (MUL-5439).
-	getShellResolved := cachedShellResolvedAgents
+	getShellResolved := cachedShellResolvedExecutables
 	probe := func(envVar, defaultCmd, modelEnv string) (AgentEntry, bool) {
 		cmd := envOrDefault(envVar, defaultCmd)
-		if path, err := resolveAgentExecutablePath(cmd); err == nil {
+		if resolved, err := resolveAgentExecutable(cmd); err == nil {
 			return AgentEntry{
-				Path:    path,
+				Path:    resolved.Path,
 				Command: cmd,
 				Model:   strings.TrimSpace(os.Getenv(modelEnv)),
+				MiseEnv: resolved.Env,
 			}, true
 		}
 		// The shell fallback only rescues bare command names. An operator
@@ -128,11 +146,12 @@ var probeAgentCLIs = func() map[string]AgentEntry {
 		if strings.ContainsAny(cmd, "/\\") {
 			return AgentEntry{}, false
 		}
-		if path, ok := getShellResolved()[cmd]; ok {
+		if resolved, ok := getShellResolved()[cmd]; ok {
 			return AgentEntry{
-				Path:    path,
+				Path:    resolved.Path,
 				Command: cmd,
 				Model:   strings.TrimSpace(os.Getenv(modelEnv)),
+				MiseEnv: resolved.Env,
 			}, true
 		}
 		if defaultCmd == "codex" && cmd == defaultCmd {

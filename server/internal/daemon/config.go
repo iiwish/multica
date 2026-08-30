@@ -768,7 +768,7 @@ func shellArgsFromEnv(name string) ([]string, error) {
 // resolved during startup so later PATH changes cannot redirect task launches.
 // Ordinary executables are pinned to their concrete target; entrypoints owned
 // by a name-dispatching shim keep the command name the manager needs to select
-// the right package (see discoveredExecutablePath).
+// the right package (see discoveredExecutableResolution).
 // On Windows this deliberately keeps the stable discovered junction path;
 // resolveAgentEntryWithHeal follows it for each launch so installer upgrades
 // that retarget a still-live junction take effect without a daemon restart.
@@ -776,19 +776,24 @@ func shellArgsFromEnv(name string) ([]string, error) {
 // previously generated hook wrappers can execute the same command name and
 // recurse forever if the daemon records or launches the wrapper.
 func resolveAgentExecutablePath(cmd string) (string, error) {
+	resolved, err := resolveAgentExecutable(cmd)
+	return resolved.Path, err
+}
+
+func resolveAgentExecutable(cmd string) (executableResolution, error) {
 	resolved, err := exec.LookPath(cmd)
 	if err != nil {
-		return "", err
+		return executableResolution{}, err
 	}
 	if strings.ContainsAny(cmd, "/\\") {
-		return canonicalConfiguredExecutablePath(resolved), nil
+		return executableResolution{Path: canonicalConfiguredExecutablePath(resolved)}, nil
 	}
 	if isInMulticaHooksDir(resolved) {
-		if unshadowed, err := lookPathExcludingMulticaHooks(cmd); err == nil {
+		if unshadowed, err := lookPathExcludingMulticaHooksResolution(cmd); err == nil {
 			return unshadowed, nil
 		}
 	}
-	return discoveredExecutablePath(resolved)
+	return discoveredExecutableResolution(resolved, cmd)
 }
 
 // agentExecutablePresent reports whether path currently resolves to a runnable
@@ -812,12 +817,12 @@ func agentExecutablePresent(path string) bool {
 // its own PATH. It is only called on the miss path — when a previously pinned
 // path has disappeared — so the login-shell cost is paid rarely, never on a
 // normal launch.
-func reresolveAgentCommand(cmd string) (string, bool) {
+func reresolveAgentCommand(cmd string) (executableResolution, bool) {
 	if cmd == "" {
-		return "", false
+		return executableResolution{}, false
 	}
-	if path, err := resolveAgentExecutablePath(cmd); err == nil {
-		return path, true
+	if resolved, err := resolveAgentExecutable(cmd); err == nil {
+		return resolved, true
 	}
 	// A bare command name the daemon's own PATH can't see: retry via the
 	// user's login shell, exactly as the startup probe does for
@@ -826,13 +831,16 @@ func reresolveAgentCommand(cmd string) (string, bool) {
 	// stay a hard miss rather than silently resolve a different binary.
 	if !strings.ContainsAny(cmd, "/\\") {
 		if path, ok := resolveAgentsViaLoginShell([]string{cmd})[cmd]; ok {
-			return path, true
+			resolved, _, err := resolveMiseDiscoveredExecutable(path, cmd)
+			if err == nil {
+				return resolved, true
+			}
 		}
 	}
-	return "", false
+	return executableResolution{}, false
 }
 
-func lookPathExcludingMulticaHooks(cmd string) (string, error) {
+func lookPathExcludingMulticaHooksResolution(cmd string) (executableResolution, error) {
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
 			dir = "."
@@ -842,10 +850,10 @@ func lookPathExcludingMulticaHooks(cmd string) (string, error) {
 		}
 		candidate := filepath.Join(dir, cmd)
 		if isExecutableFile(candidate) {
-			return discoveredExecutablePath(candidate)
+			return discoveredExecutableResolution(candidate, cmd)
 		}
 	}
-	return "", exec.ErrNotFound
+	return executableResolution{}, exec.ErrNotFound
 }
 
 func isInMulticaHooksDir(path string) bool {
@@ -970,10 +978,12 @@ var supportedLoginShells = map[string]struct{}{
 	"ksh":  {},
 }
 
-// resolveAgentsViaLoginShell asks the user's login shell to print an absolute,
-// invocation-safe path to each name in `names`. It returns a map
-// of name → path for whatever the shell could find, and an empty map if the
-// shell is unavailable / unsupported / times out / produces no usable output.
+// resolveAgentsViaLoginShell asks the user's login shell to print an absolute
+// entrypoint for each name in `names`. It returns a map of name → path for
+// whatever the shell could find, and an empty map if the shell is unavailable /
+// unsupported / times out / produces no usable output. A returned path is a
+// discovery input, not necessarily the final launch target: callers pass it
+// through resolveMiseDiscoveredExecutable before storing an AgentEntry.
 //
 // Why we need this:
 //
@@ -1045,13 +1055,6 @@ var resolveAgentsViaLoginShell = func(names []string) map[string]string {
 		name, path := parts[0], strings.TrimSpace(parts[1])
 		if !filepath.IsAbs(path) {
 			continue
-		}
-		misePath, miseManaged, err := resolveMiseDiscoveredPath(path, name)
-		if err != nil {
-			continue
-		}
-		if miseManaged {
-			path = misePath
 		}
 		// Final reality check: the path the shell gave us must still be
 		// executable from the daemon's perspective right now. fnm

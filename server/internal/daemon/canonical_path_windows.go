@@ -103,8 +103,8 @@ func canonicalPath(path string) (string, error) {
 	}
 }
 
-func discoveredExecutablePath(path string) (string, error) {
-	return absoluteExecutablePath(path), nil
+func discoveredExecutableResolution(path, _ string) (executableResolution, error) {
+	return executableResolution{Path: absoluteExecutablePath(path)}, nil
 }
 
 func absoluteExecutablePath(path string) string {
@@ -115,8 +115,8 @@ func absoluteExecutablePath(path string) string {
 	return abs
 }
 
-func resolveMiseDiscoveredPath(path, _ string) (string, bool, error) {
-	return path, false, nil
+func resolveMiseDiscoveredExecutable(path, _ string) (executableResolution, bool, error) {
+	return executableResolution{Path: path}, false, nil
 }
 
 func canonicalConfiguredExecutablePath(path string) string {
