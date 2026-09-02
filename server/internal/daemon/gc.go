@@ -216,7 +216,7 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 			stats.skipped++
 			continue
 		}
-		if cleaned, cleanupErr := execenv.RetryPendingLocalWorktreeCleanup(taskDir, d.logger); cleanupErr != nil {
+		if cleaned, cleanupErr := d.retryFinalizedWorktreeCleanup(taskDir); cleanupErr != nil {
 			d.logger.Warn("gc: retry finalized worktree cleanup failed", "dir", taskDir, "error", cleanupErr)
 		} else if cleaned {
 			stats.finalizedWorktreesReclaimed++
@@ -251,6 +251,27 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 			os.Remove(wsDir)
 		}
 	}
+}
+
+// retryFinalizedWorktreeCleanup applies the same ownership and exclusion
+// guarantees as every other GC mutation. The durable marker controls which
+// worktree and branch to clean, but it is not proof that the surrounding task
+// directory belongs to this daemon.
+func (d *Daemon) retryFinalizedWorktreeCleanup(taskDir string) (bool, error) {
+	if _, err := d.gcTaskDirOwner(taskDir); err != nil {
+		return false, fmt.Errorf("refusing pending cleanup for unowned task directory: %w", err)
+	}
+	release, ok := d.reserveEnvRootForGC(taskDir)
+	if !ok {
+		return false, nil
+	}
+	defer release()
+	// Re-check after taking the exclusion lock so a concurrent reset cannot
+	// replace the proven directory before the cleanup mutates its worktree.
+	if _, err := d.gcTaskDirOwner(taskDir); err != nil {
+		return false, fmt.Errorf("task ownership changed before pending cleanup: %w", err)
+	}
+	return execenv.RetryPendingLocalWorktreeCleanup(taskDir, d.logger)
 }
 
 const issueGCBatchSize = 500
