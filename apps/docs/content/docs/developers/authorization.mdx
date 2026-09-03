@@ -119,7 +119,7 @@ The server may return the resource with sensitive fields removed, deny with `403
 
 Task tokens authenticate an agent process and bind it to one task, agent, user, and workspace. Agent-to-agent invocation is evaluated using the top-of-chain human originator when one exists, rather than trusting the immediate agent as a new source of authority.
 
-Workspace-wide agent grants may admit workspace-internal agent and system triggers without a human originator. Member-targeted grants require a matching effective human and fail closed when attribution is missing.
+Scheduled and webhook autopilot runs carry the firing trigger's immutable creator as their human originator (MUL-6951, #7918): arming a trigger authorizes the run the same way a manual "run now" by that member would. The invoke gate is unchanged — it still evaluates that human against the agent's invocation grants — and dispatch admission resolves the same principal from the trigger's immutable `created_by` (`ResolveAutopilotTriggerPrincipal`), never `published_by`, so a substantive trigger edit cannot move whose rights the automation runs with. Triggers predating per-trigger creator records degrade to audit-only attribution with no originator, and the invoke gate fails closed. The connected-apps overlay for agent runs is built from the agent owner's integrations and allow-list regardless of originator, so naming the originator hands out no third-party credentials.
 
 Account billing explicitly rejects task-token and cloud-node actor sources. Agent environment-secret management separately rejects agent actors, then requires the agent owner or a workspace owner/admin. These guards are attached to sensitive endpoints rather than applied globally because agents legitimately create issues, write comments, and perform other workspace work.
 
@@ -137,7 +137,7 @@ This matrix summarizes representative decisions. The resource-specific handler r
 | Edit, archive, or restore an agent | Yes | Yes | Own only | Resource ownership check |
 | Change agent invocation grants | Own only | Own only | Own only | Agent owner only; no workspace-role override |
 | View agent inventory | All | All | Own or granted | Agent actors have a separate A2A view path; secrets are still redacted |
-| Invoke an agent | By grant | By grant | By grant | Agent owner always allowed; no admin bypass for private agents |
+| Invoke an agent | By grant | By grant | By grant | Agent owner always allowed; no admin bypass for private agents; scheduled or webhook runs invoke as the firing trigger's creator |
 | Use a runtime | By visibility | By visibility | By visibility | Private runtime is owner-only; public runtime is workspace-usable; ownerless runtime is unusable |
 | Rename or delete a runtime | Yes | Yes | Own only | Does not imply permission to use or share it |
 | Change runtime visibility | Own only | Own only | Own only | Runtime owner consent; no role override |
