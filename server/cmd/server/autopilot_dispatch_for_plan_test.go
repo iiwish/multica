@@ -266,12 +266,19 @@ func TestDispatchAutopilotUsesPayloadTitleToDistinguishWebhookDeliveries(t *test
 		WHERE autopilot_run_id IN (SELECT id FROM autopilot_run WHERE autopilot_id = $1)
 		   OR issue_id IN (SELECT issue_id FROM autopilot_run WHERE autopilot_id = $1)
 	`, ap.ID)
+	triggerID := parseUUID(fx.Insert(t, "autopilot_trigger", testutil.Cols{
+		"autopilot_id":    ap.ID,
+		"kind":            "webhook",
+		"enabled":         true,
+		"created_by_type": "member",
+		"created_by_id":   testUserID,
+	}))
 
 	payload := func(identifier string) []byte {
 		return []byte(`{"event":"ticket.updated","eventPayload":{"identifier":"` + identifier + `"}}`)
 	}
 
-	first, err := autopilotSvc.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "webhook", payload("ABC-101"))
+	first, err := autopilotSvc.DispatchAutopilot(ctx, ap, triggerID, "webhook", payload("ABC-101"))
 	if err != nil {
 		t.Fatalf("first DispatchAutopilot: %v", err)
 	}
@@ -279,7 +286,7 @@ func TestDispatchAutopilotUsesPayloadTitleToDistinguishWebhookDeliveries(t *test
 		t.Fatalf("first dispatch = %+v, want issue_created", first)
 	}
 
-	second, err := autopilotSvc.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "webhook", payload("ABC-102"))
+	second, err := autopilotSvc.DispatchAutopilot(ctx, ap, triggerID, "webhook", payload("ABC-102"))
 	if err != nil {
 		t.Fatalf("second DispatchAutopilot: %v", err)
 	}
@@ -287,7 +294,7 @@ func TestDispatchAutopilotUsesPayloadTitleToDistinguishWebhookDeliveries(t *test
 		t.Fatalf("distinct delivery = %+v, want issue_created", second)
 	}
 
-	redelivery, err := autopilotSvc.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "webhook", payload("ABC-101"))
+	redelivery, err := autopilotSvc.DispatchAutopilot(ctx, ap, triggerID, "webhook", payload("ABC-101"))
 	if err != nil {
 		t.Fatalf("redelivery DispatchAutopilot: %v", err)
 	}
