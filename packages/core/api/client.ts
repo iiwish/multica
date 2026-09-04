@@ -206,8 +206,8 @@ import type {
   CreateBillingCheckoutSessionResponse,
   BillingCheckoutSessionStatus,
   CreateBillingPortalSessionResponse,
-  WorkspaceSubscriptionEntitlements,
   WorkspaceSubscriptionSummary,
+  IssueLimitUsage,
   WorkspaceSubscriptionPrices,
   CreateWorkspaceSubscriptionCheckoutRequest,
   CreateWorkspaceSubscriptionCheckoutResponse,
@@ -333,8 +333,8 @@ import {
   CreateBillingCheckoutSessionResponseSchema,
   BillingCheckoutSessionStatusSchema,
   CreateBillingPortalSessionResponseSchema,
-  WorkspaceSubscriptionEntitlementsSchema,
   WorkspaceSubscriptionSummarySchema,
+  IssueLimitUsageSchema,
   WorkspaceSubscriptionPricesSchema,
   CreateWorkspaceSubscriptionCheckoutResponseSchema,
   WorkspaceSubscriptionSeatReconcileResultSchema,
@@ -1232,19 +1232,26 @@ export class ApiClient {
   }
 
   async getChildIssueProgress(): Promise<{
-    progress: {
-      parent_issue_id: string;
-      total: number;
-      done: number;
-      visible_total?: number;
-      visible_done?: number;
-      hidden_total?: number;
-    }[];
+    progress: { parent_issue_id: string; total: number; done: number }[];
   }> {
     const raw = await this.fetch<unknown>("/api/issues/child-progress");
-    return parseWithFallback(raw, ChildIssueProgressResponseSchema, { progress: [] }, {
-      endpoint: "GET /api/issues/child-progress",
-    });
+    return parseWithFallback(
+      raw,
+      ChildIssueProgressResponseSchema,
+      { progress: [] },
+      { endpoint: "GET /api/issues/child-progress" },
+    );
+  }
+
+  async getIssueLimitUsage(): Promise<IssueLimitUsage | null> {
+    const raw = await this.fetch<unknown>("/api/issues/limit-usage");
+    if (raw == null) return null;
+    return parseWithFallback<IssueLimitUsage | null>(
+      raw,
+      IssueLimitUsageSchema,
+      null,
+      { endpoint: "GET /api/issues/limit-usage" },
+    );
   }
 
   async deleteIssue(id: string): Promise<void> {
@@ -1821,18 +1828,6 @@ export class ApiClient {
   //   - a 2xx body that does not match the contract returns null here.
   // ---------------------------------------------------------------------
 
-  async getWorkspaceSubscriptionEntitlements(): Promise<WorkspaceSubscriptionEntitlements | null> {
-    const raw = await this.fetch<unknown>(
-      "/api/cloud-subscriptions/entitlements",
-    );
-    return parseWithFallback<WorkspaceSubscriptionEntitlements | null>(
-      raw,
-      WorkspaceSubscriptionEntitlementsSchema,
-      null,
-      { endpoint: "GET /api/cloud-subscriptions/entitlements" },
-    );
-  }
-
   async getWorkspaceSubscriptionSummary(): Promise<WorkspaceSubscriptionSummary | null> {
     const raw = await this.fetch<unknown>("/api/cloud-subscriptions/summary");
     return parseWithFallback<WorkspaceSubscriptionSummary | null>(
@@ -2272,10 +2267,17 @@ export class ApiClient {
   // than cast: an unparseable body degrades to an explicit "failed" record that
   // shows the discovery error and keeps manual model entry usable, instead of a
   // fabricated empty catalog or an endless spinner (MUL-5444).
-  async initiateListModels(runtimeId: string): Promise<RuntimeModelListRequest> {
-    const raw = await this.fetch<unknown>(`/api/runtimes/${runtimeId}/models`, {
-      method: "POST",
-    });
+  async initiateListModels(
+    runtimeId: string,
+    options: { force?: boolean } = {},
+  ): Promise<RuntimeModelListRequest> {
+    const query = options.force === true ? "?force=true" : "";
+    const raw = await this.fetch<unknown>(
+      `/api/runtimes/${runtimeId}/models${query}`,
+      {
+        method: "POST",
+      },
+    );
     return parseWithFallback<RuntimeModelListRequest>(
       raw,
       RuntimeModelListRequestSchema,
@@ -4161,7 +4163,9 @@ export class ApiClient {
         action: "off",
         used: null,
         reserved: null,
+        total: null,
         limit: null,
+        reached: null,
         period_start: null,
         period_end: null,
         reset_at: null,

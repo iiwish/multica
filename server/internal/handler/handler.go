@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/dbreader"
 	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
@@ -164,33 +165,46 @@ type WorkspaceSetRefreshNotifier interface {
 }
 
 // DaemonPendingWorkNotifier pushes a runtime-scoped "heartbeat now" hint to the
-// daemon so a queued heartbeat-carried request (model discovery) is picked up
-// immediately instead of on the daemon's next scheduled tick (MUL-5444).
+// daemon so a queued heartbeat-carried request (model discovery, capability
+// discovery, or local-skill import) is picked up immediately instead of on the
+// daemon's next scheduled tick (MUL-5444).
 // Satisfied by both *daemonws.Hub (single-node) and *daemonws.RelayNotifier
 // (multi-node, fans out through Redis).
 type DaemonPendingWorkNotifier interface {
 	NotifyPendingWork(runtimeID, kind string)
 }
 
+// RuntimeGoneNotifier invalidates a runtime that was deleted while its daemon
+// still has an authenticated WebSocket connection.
+type RuntimeGoneNotifier interface {
+	NotifyRuntimeGone(runtimeID string)
+}
+
+// RuntimeRecoveryNotifier republishes the daemon:register lifecycle refresh
+// after a heartbeat actually flipped an offline runtime row back online
+// (sweeper-race fallback, batch-receipt reconciliation). Recovery paths already
+// know the workspace, so publishing never needs a follow-up database lookup.
+type RuntimeRecoveryNotifier interface {
+	NotifyRuntimeRecovered(ctx context.Context, workspaceID string)
+}
+
 type Handler struct {
-	Queries   *db.Queries
-	DB        dbExecutor
-	TxStarter txStarter
-	// issueTableWindowCache is initialized only on the request-local Handler
-	// copy used by a repeatable-read table request. It lets facets reuse one
-	// visible-id snapshot without adding mutable state to the shared Handler.
-	issueTableWindowCache  *issueTableWindowCache
+	Queries                *db.Queries
+	ReadSelector           *dbreader.Selector
+	DB                     dbExecutor
+	TxStarter              txStarter
 	Hub                    *realtime.Hub
 	DaemonHub              *daemonws.Hub
 	DaemonProfileRefresh   RuntimeProfileRefreshNotifier
 	DaemonWorkspaceRefresh WorkspaceSetRefreshNotifier
+	DaemonRuntimeGone      RuntimeGoneNotifier
 	Bus                    *events.Bus
 	TaskService            *service.TaskService
 	PluginService          *service.PluginService
 	IssueService           *service.IssueService
 	AutopilotService       *service.AutopilotService
 	// Entitlements supplies workspace-scoped commercial gates. A nil provider
-	// preserves the self-hosted and pre-rollout behavior without extra reads.
+	// preserves self-hosted behavior without extra reads.
 	Entitlements entitlement.Provider
 	// SeatCapacity executes Cloud's pre-purchased human-seat protocol. Nil or
 	// disabled preserves self-hosted behavior.
@@ -238,6 +252,8 @@ type Handler struct {
 	InvitationRateLimiters       InvitationRateLimiters
 	WebhookDeliveryWorker        *WebhookDeliveryWorker
 	CloudRuntime                 cloudRuntimeProxy
+	// Test-only HTTP override; nil uses the default client in production.
+	googleOAuthHTTPClient *http.Client
 	// Lark integration. All three are nil when the Lark master key
 	// (MULTICA_LARK_SECRET_KEY) is unset; the corresponding HTTP
 	// handlers return 503 in that case so a misconfigured self-host
@@ -413,9 +429,11 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	}
 	var daemonProfileRefresh RuntimeProfileRefreshNotifier
 	var daemonWorkspaceRefresh WorkspaceSetRefreshNotifier
+	var daemonRuntimeGone RuntimeGoneNotifier
 	if daemonHub != nil {
 		daemonProfileRefresh = daemonHub
 		daemonWorkspaceRefresh = daemonHub
+		daemonRuntimeGone = daemonHub
 	}
 
 	llmClient := llm.New(llm.Config{
@@ -447,12 +465,14 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	taskSvc.QuickActions = llmClient
 	h := &Handler{
 		Queries:                      queries,
+		ReadSelector:                 dbreader.NewPrimaryOnly(queries),
 		DB:                           executor,
 		TxStarter:                    txStarter,
 		Hub:                          hub,
 		DaemonHub:                    daemonHub,
 		DaemonProfileRefresh:         daemonProfileRefresh,
 		DaemonWorkspaceRefresh:       daemonWorkspaceRefresh,
+		DaemonRuntimeGone:            daemonRuntimeGone,
 		Bus:                          bus,
 		TaskService:                  taskSvc,
 		PluginService:                service.NewPluginService(queries, txStarter),
@@ -481,6 +501,11 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		cfg: cfg,
 	}
 	h.WebhookDeliveryWorker = NewWebhookDeliveryWorker(h)
+	// The default passthrough scheduler reports sweeper-race recoveries so the
+	// daemon:register refresh fires even without the production batched wiring.
+	if passthrough, ok := h.HeartbeatScheduler.(*PassthroughHeartbeatScheduler); ok {
+		passthrough.RecoveryNotifier = h
+	}
 
 	// GitHub API snapshot pipeline for PR cards (MUL-5265). Built
 	// unconditionally but inert (every trigger no-ops) when the App private key
@@ -721,6 +746,25 @@ func (h *Handler) notifyDaemonWorkspacesChanged(userIDs ...string) {
 		seen[userID] = struct{}{}
 		h.DaemonWorkspaceRefresh.NotifyWorkspacesChanged(userID)
 	}
+}
+
+// NotifyRuntimeGone emits the post-commit runtime invalidation signal. It is
+// exported so the runtime GC can use the same publisher as request handlers.
+func (h *Handler) NotifyRuntimeGone(runtimeID string) {
+	if h == nil || h.DaemonRuntimeGone == nil || runtimeID == "" {
+		return
+	}
+	h.DaemonRuntimeGone.NotifyRuntimeGone(runtimeID)
+}
+
+// NotifyRuntimeRecovered republishes the workspace-scoped daemon:register
+// lifecycle event after a heartbeat restored a runtime from offline. Runtime
+// details are intentionally omitted from the payload.
+func (h *Handler) NotifyRuntimeRecovered(_ context.Context, workspaceID string) {
+	if h == nil || workspaceID == "" {
+		return
+	}
+	h.PublishRuntimeRefresh(workspaceID, "system", "", "heartbeat_recovery")
 }
 
 // publishTask is publish() plus a TaskID hint so the realtime layer can route
@@ -986,9 +1030,6 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	// silently returns false for non-identifier strings, falling through to
 	// the UUID path below.
 	if issue, ok := h.resolveIssueByIdentifier(r.Context(), issueID, workspaceID); ok {
-		if !h.authorizeIssueWindow(w, r, issue.ID, issue.WorkspaceID, "direct") {
-			return db.Issue{}, false
-		}
 		return issue, true
 	}
 
@@ -1010,9 +1051,6 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	})
 	if err != nil {
 		writeError(w, http.StatusNotFound, "issue not found")
-		return db.Issue{}, false
-	}
-	if !h.authorizeIssueWindow(w, r, issue.ID, issue.WorkspaceID, "direct") {
 		return db.Issue{}, false
 	}
 	return issue, true
@@ -1184,9 +1222,6 @@ func (h *Handler) loadInboxItemForUser(w http.ResponseWriter, r *http.Request, i
 
 	if item.RecipientType != "member" || uuidToString(item.RecipientID) != userID {
 		writeError(w, http.StatusNotFound, "inbox item not found")
-		return db.InboxItem{}, false
-	}
-	if item.IssueID.Valid && !h.authorizeIssueWindow(w, r, item.IssueID, item.WorkspaceID, "inbox") {
 		return db.InboxItem{}, false
 	}
 	return item, true
