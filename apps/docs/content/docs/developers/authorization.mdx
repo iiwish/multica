@@ -100,7 +100,7 @@ Ownership is resource-local. It is not a fourth workspace role and does not tran
 Explicit grants answer narrower questions than workspace roles:
 
 - **Agent invocation targets** decide who may trigger an agent. `private` admits only the agent owner. `public_to` evaluates workspace and member targets. Team targets are reserved and grant nothing in the current model.
-- **Autopilot collaborators** receive write and execute access to one Autopilot. They cannot grant or revoke collaborators; that remains with the creator and workspace owner/admin.
+- **Autopilot collaborators** can edit one Autopilot and request runs. The target agent still has a separate invocation gate. Collaborators cannot grant or revoke collaborators; that remains with the creator and workspace owner/admin.
 
 Agent access separates **seeing and managing inventory** from **using the underlying capability**. A workspace owner/admin may inspect or manage another member's private agent, but cannot invoke it without an invocation grant. This prevents an administrative role from silently using the agent owner's connected credentials.
 
@@ -117,17 +117,55 @@ The server may return the resource with sensitive fields removed, deny with `403
 
 ### Human, agent, and system actors
 
-Task tokens authenticate an agent process and bind it to one task, agent, user, and workspace. Agent-to-agent invocation is evaluated using the top-of-chain human originator when one exists, rather than trusting the immediate agent as a new source of authority.
-
-An Autopilot can have several triggers, and each trigger has its own immutable `created_by`; there is no single human authority for the Autopilot as a whole. A scheduled or webhook dispatch with a provable creator carries the firing trigger's creator as its human originator (MUL-6951, #7918). Dispatch admission and task attribution both resolve that same per-trigger principal through `ResolveAutopilotTriggerPrincipal`, never `published_by`, so one dispatch cannot be admitted as one member and execute as another. The resolver accepts the creator only when the trigger belongs to the expected Autopilot and workspace, `created_by_type` is `member`, and that member still belongs to the workspace. Any failed check leaves the run without an authorization principal and the invoke gate fails closed.
-
-Autopilot write authority and trigger execution authority remain separate. The Autopilot creator, a workspace owner or admin, or a granted collaborator can change what an Autopilot does through `requireAutopilotWrite`, while each existing trigger continues to be admitted and attributed against its immutable trigger creator. This prevents an editor from injecting their own rights into the trigger, but it also lets edited behavior exercise the trigger creator's rights. That asymmetry is an accepted tradeoff in the current collaborative editing model. `published_by` records the latest substantive editor for configuration audit; it does not authorize the run.
-
-Migration 449 initialized existing trigger creator fields from the last recorded `published_by`. When that publisher is a member, it becomes the immutable run principal; for an already-edited trigger this can identify the last editor rather than the historical creator. That compatibility choice preserves existing automations but gives the recovered member full originator authority rather than audit-only attribution, widening the authorization surface. Older rows with no publisher to recover keep a null creator: attribution can degrade to audit-only `rule_owner`, but no originator is inferred and invocation fails closed. Re-saving such a trigger updates `published_by` only, so restoring automatic execution requires recreating the trigger.
-
-The connected-apps overlay for an agent run is always the intersection of the agent owner's active connections and the agent's allow-list. `originatorUserID` is retained only for audit logging and never substitutes the originator's credentials. Invocation permission nevertheless includes use of the apps the owner attached to that agent. When a valid migration 449 backfill causes another member to pass invocation admission, that member can therefore exercise the existing overlay even though credential selection itself does not change.
+Task tokens authenticate an agent process and bind it to one task, agent, user, and workspace. That authenticated identity is distinct from the human whose invocation authority a delegated run carries. The [run authority model](#run-authority) below identifies that human without treating an agent's credentials as a new source of human authority.
 
 Account billing explicitly rejects task-token and cloud-node actor sources. Agent environment-secret management separately rejects agent actors, then requires the agent owner or a workspace owner/admin. These guards are attached to sensitive endpoints rather than applied globally because agents legitimately create issues, write comments, and perform other workspace work.
+
+## Run authority
+
+Three questions must stay separate: **who authenticated the request**, **whose permission admits the run**, and **whose connected credentials the agent uses**. An audit label is not an authorization grant.
+
+### Invocation identity
+
+| Entry point | Invocation principal | Admission rule |
+| --- | --- | --- |
+| Human invocation, including Autopilot **Run now** | The acting member | Check that member's access to the target agent; no workspace-admin bypass |
+| Agent-to-agent invocation with a human originator | The top-of-chain human, not the immediate agent | Apply the target agent's invocation gate to that originator |
+| General agent/system invocation without a human originator | The workspace-internal agent/system principal; no human is inferred | Only an explicit `public_to` **workspace** target admits it; private and member-target access remain denied, and team targets are inert |
+| Scheduled or webhook Autopilot dispatch | The firing trigger's immutable member creator | Resolve a valid creator, then check that member's access to the target agent; a workspace target does not waive creator resolution |
+
+The workspace-target exception belongs to the **general invocation gate**, not every entry point. An Autopilot automatic dispatch must prove its trigger creator even when the target agent is shared with the whole workspace. Missing attribution must never be repaired by silently borrowing an agent owner's, editor's, or rule publisher's rights.
+
+### Autopilot admission
+
+An Autopilot has two independent permission checks:
+
+1. **Permission to request or configure work.** `requireAutopilotWrite` admits the Autopilot creator, workspace owner/admin, or a granted collaborator to editing and manual run requests.
+2. **Permission to invoke the target agent.** `autopilotAdmitInvoke` checks the current clicker for **Run now**, or the firing trigger's creator for scheduled/webhook dispatch. Passing the first check does not satisfy the second.
+
+For example, a workspace admin can manage an Autopilot but still cannot manually run its private squad leader if the admin lacks invocation access. The manual endpoint can return HTTP `200` with `status: "skipped"` and `reason_code: "invocation_not_allowed"`. Clients must inspect the run outcome, not treat transport success as proof that execution started.
+
+An Autopilot can have several triggers, each with its own immutable `created_by`. Authority is **per trigger and per dispatch**, not per Autopilot. Admission and task attribution both use `ResolveAutopilotTriggerPrincipal`, never `published_by`, to select the same human. The resolver requires all of the following:
+
+- The trigger belongs to the expected Autopilot and workspace.
+- `created_by_type` is `member` and `created_by_id` is present.
+- That creator is still a member of the workspace, checked on every dispatch.
+
+If any check fails, automatic dispatch has no valid invocation principal and is refused. An audit-only `rule_owner` attribution cannot satisfy this gate.
+
+**Editing does not transfer execution identity.** Authorized editors can change what an Autopilot does, while existing triggers continue to execute as their immutable creators. An editor cannot inject their own rights into an existing trigger, but edited behavior can exercise the trigger creator's rights. This is an accepted tradeoff of collaborative editing. `published_by` records the latest substantive editor for configuration audit only.
+
+### Connected credentials
+
+The connected-apps overlay is the intersection of the **agent owner's active connections** and the **agent's allow-list**. Within overlay construction, `originatorUserID` is not an authorization input and never selects the originator's credentials.
+
+Permission to invoke an agent includes use of the apps its owner attached. Credential selection and exposure are therefore different boundaries: admitting another member can give that member use of the existing overlay without changing whose credentials it contains.
+
+### Legacy trigger recovery
+
+Triggers initialized by [migration 449](https://github.com/multica-ai/multica/blob/main/server/migrations/449_autopilot_trigger_created_by.up.sql) retain the last recoverable `published_by` as their immutable creator. For an already-edited trigger, this can identify its last editor rather than its historical creator. A recovered member is a full invocation principal, not merely audit attribution. This compatibility choice preserves existing automations while widening which members' invocation authority automatic runs can exercise. Admitted runs can use the target agent owner's attached apps even though credential selection is unchanged.
+
+A trigger with no recoverable creator has no invocation principal. Attribution can degrade to audit-only `rule_owner`, but automatic dispatch remains refused. Re-saving updates `published_by`, not `created_by`: restoring automatic execution requires recreating the trigger under a current member with the required invocation access.
 
 ## Current capability matrix
 
@@ -147,7 +185,8 @@ This matrix summarizes representative decisions. The resource-specific handler r
 | Use a runtime | By visibility | By visibility | By visibility | Private runtime is owner-only; public runtime is workspace-usable; ownerless runtime is unusable |
 | Rename or delete a runtime | Yes | Yes | Own only | Does not imply permission to use or share it |
 | Change runtime visibility | Own only | Own only | Own only | Runtime owner consent; no role override |
-| Write or execute an Autopilot | Yes | Yes | Creator or collaborator | Explicit collaborator grant applies per Autopilot |
+| Edit an Autopilot | Yes | Yes | Creator or collaborator | Editing does not transfer existing triggers' execution identity |
+| Request a manual Autopilot run | Yes | Yes | Creator or collaborator | Target-agent invocation is checked separately against the clicker; the run can be `skipped` |
 | Manage Autopilot collaborators | Yes | Yes | Creator only | Collaborators cannot re-grant |
 | Read a chat session | Creator only | Creator only | Creator only | Workspace role does not override creator privacy |
 | Reveal or rotate agent environment secrets | Yes | Yes | Agent owner only | Agent actors are denied; successful reveals are audited |
@@ -173,7 +212,7 @@ Authorization changes must preserve these properties:
 - **Workspace isolation:** resource lookup and mutation carry the target `workspace_id`; knowing a UUID is insufficient.
 - **Bound machine credentials:** credentials with a server-established task, workspace, installation, or node binding cannot widen that scope with request parameters.
 - **Governance is not direct use authority:** administrative visibility or management does not automatically grant direct invocation of another member's private agent or direct use of their credentials, runtime, or chat. Autopilot editors can still change behavior that an existing trigger later executes as its immutable creator, as described above.
-- **Fail closed:** unknown permission modes, missing attribution, invalid grants, and failed policy lookups deny rather than broaden access.
+- **No inferred authority:** missing required principals and failed grant lookups cannot create access; unknown modes add no grants. The general invocation gate's explicit workspace-target exception admits unattributed agent/system principals, but never supplies a human identity or bypasses Autopilot creator resolution.
 - **Revocation is complete:** removing membership also removes or deactivates dependent grants and execution paths that would retain access.
 - **Realtime parity:** a subscription cannot reveal data the same principal could not read through the corresponding HTTP surface.
 - **Secret minimization:** responses and broadcasts redact sensitive fields independently of whether the surrounding resource is visible.
@@ -195,19 +234,23 @@ Until those decisions are made, new behavior should extend the narrowest existin
 
 | Concern | Primary source |
 | --- | --- |
-| Credential resolution and actor-source stamps | `server/internal/middleware/auth.go` |
-| Workspace resolution, membership, and role middleware | `server/internal/middleware/workspace.go` |
-| Route-level member/admin/owner boundaries | `server/cmd/server/router.go` |
-| Actor classification and common handler gates | `server/internal/handler/handler.go` |
-| Agent view and invocation decisions | `server/internal/handler/agent_access.go` |
-| Agent ownership, management, and response redaction | `server/internal/handler/agent.go` |
-| Agent environment-secret authorization and audit | `server/internal/handler/agent_env.go` |
-| Runtime ownership, visibility, and use consent | `server/internal/handler/runtime.go` |
-| Autopilot creator and collaborator access | `server/internal/handler/autopilot.go` |
-| Autopilot trigger principal and dispatch admission | `server/internal/service/task.go`, `server/internal/service/autopilot.go` |
-| Realtime task and chat scope authorization | `server/cmd/server/scope_authorizer.go` |
-| Shared client permission decisions | `packages/core/permissions/` |
-| Shared runtime picker decision | `packages/core/runtimes/access.ts` |
+| Credential resolution and actor-source stamps | [`auth.go`](https://github.com/multica-ai/multica/blob/main/server/internal/middleware/auth.go) |
+| Workspace resolution, membership, and role middleware | [`workspace.go`](https://github.com/multica-ai/multica/blob/main/server/internal/middleware/workspace.go) |
+| Route-level member/admin/owner boundaries | [`router.go`](https://github.com/multica-ai/multica/blob/main/server/cmd/server/router.go) |
+| Actor classification and common handler gates | [`handler.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/handler.go) |
+| Agent view and invocation decisions | [`agent_access.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/agent_access.go) |
+| Agent ownership, management, and response redaction | [`agent.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/agent.go) |
+| Agent environment-secret authorization and audit | [`agent_env.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/agent_env.go) |
+| Runtime ownership, visibility, and use consent | [`runtime.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/runtime.go) |
+| Autopilot creator and collaborator access | [`autopilot.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/autopilot.go) |
+| Autopilot trigger principal and dispatch admission | [`task.go`](https://github.com/multica-ai/multica/blob/main/server/internal/service/task.go), [`autopilot.go`](https://github.com/multica-ai/multica/blob/main/server/internal/service/autopilot.go) |
+| Connected-app credential selection | [`dispatch.go`](https://github.com/multica-ai/multica/blob/main/server/internal/integrations/composio/dispatch.go) |
+| Member removal and dependent cleanup | [`workspace_revoke.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/workspace_revoke.go) |
+| Workspace-target exception and member-target denial tests | [`agent_permission_test.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/agent_permission_test.go) |
+| Manual-run admission and trigger-principal tests | [`autopilot_private_leader_test.go`](https://github.com/multica-ai/multica/blob/main/server/internal/handler/autopilot_private_leader_test.go), [`autopilot_run_principal_test.go`](https://github.com/multica-ai/multica/blob/main/server/internal/service/autopilot_run_principal_test.go) |
+| Realtime task and chat scope authorization | [`scope_authorizer.go`](https://github.com/multica-ai/multica/blob/main/server/cmd/server/scope_authorizer.go) |
+| Shared client permission decisions | [`permissions/`](https://github.com/multica-ai/multica/tree/main/packages/core/permissions) |
+| Shared runtime picker decision | [`access.ts`](https://github.com/multica-ai/multica/blob/main/packages/core/runtimes/access.ts) |
 
 ## Related documentation
 
