@@ -650,11 +650,6 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 			return nil, fmt.Errorf("execenv: prepare claude skill settings: %w", err)
 		}
 		env.ClaudeSettingsPath = settingsPath
-		pluginDirs, err := prepareClaudePluginSkillCopies(envRoot, params.Task.DisabledRuntimeSkills)
-		if err != nil {
-			return nil, fmt.Errorf("execenv: prepare claude plugin skills: %w", err)
-		}
-		env.ClaudePluginDirs = pluginDirs
 	}
 
 	// For Hermes, redirect HERMES_HOME to a per-task compatibility overlay ONLY
@@ -942,12 +937,6 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 			return nil
 		}
 		env.ClaudeSettingsPath = settingsPath
-		pluginDirs, err := prepareClaudePluginSkillCopies(env.RootDir, params.Task.DisabledRuntimeSkills)
-		if err != nil {
-			logger.Warn("execenv: refresh claude plugin skills failed; forcing fresh prepare", "error", err)
-			return nil
-		}
-		env.ClaudePluginDirs = pluginDirs
 	}
 
 	// Re-deny Reasonix's `ask` tool on reuse: CleanupSidecars above removed the

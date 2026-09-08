@@ -8155,7 +8155,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// families go through New. This is the single production boundary — the
 	// daemon never calls agent.New or agent.NewRuntime directly, so the two
 	// factories stay meaning exactly one thing each.
-	backend, err := agent.ResolveBackend(provider, agent.Config{
+	backendConfig := agent.Config{
 		ExecutablePath: entry.Path,
 		LaunchPrefix:   profileFixedArgs,
 		CLIVersion:     resolvedVersion,
@@ -8166,7 +8166,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		DaemonVersion:  d.cfg.CLIVersion,
 		CodexVersion:   codexVersion,
 		BuiltinRuntime: !usesCustomProfileCommand,
-	})
+	}
+	backend, err := agent.ResolveBackend(provider, backendConfig)
 	if err != nil {
 		return TaskResult{}, fmt.Errorf("create agent backend: %w", err)
 	}
@@ -8270,6 +8271,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		ClaudeSettingsPath:     env.ClaudeSettingsPath,
 		ClaudePluginDirs:       env.ClaudePluginDirs,
 		QwenpawWorkspace:       env.QwenpawWorkspace,
+	}
+	if provider == "claude" {
+		if err := d.prepareTaskClaudePlugins(ctx, backendConfig, execOpts, env, taskCtx.DisabledRuntimeSkills); err != nil {
+			return TaskResult{}, asEnvironmentSetupFailure(fmt.Errorf("prepare Claude plugin skills: %w", err))
+		}
+		execOpts.ClaudePluginDirs = env.ClaudePluginDirs
 	}
 	// Some providers do not reliably load the per-task runtime config files we
 	// write into the task workdir:
@@ -9554,25 +9561,15 @@ func convertDisabledRuntimeSkillsForEnv(agentData *AgentData, runtimeID, provide
 		return nil
 	}
 	result := make([]execenv.RuntimeSkillRefForEnv, 0, len(agentData.DisabledRuntimeSkills))
-	var pluginPaths map[string]string
 	for _, skill := range agentData.DisabledRuntimeSkills {
 		if skill.RuntimeID != runtimeID || skill.Provider != provider {
 			continue
 		}
-		if provider == "claude" && skill.Root == localSkillRootPlugin && pluginPaths == nil {
-			pluginPaths = make(map[string]string)
-			if home, err := os.UserHomeDir(); err == nil {
-				for _, plugin := range listEnabledClaudePlugins(home) {
-					pluginPaths[plugin.ID] = plugin.InstallPath
-				}
-			}
-		}
 		result = append(result, execenv.RuntimeSkillRefForEnv{
-			Root:       skill.Root,
-			Key:        skill.Key,
-			Name:       skill.Name,
-			Plugin:     skill.Plugin,
-			PluginPath: pluginPaths[skill.Plugin],
+			Root:   skill.Root,
+			Key:    skill.Key,
+			Name:   skill.Name,
+			Plugin: skill.Plugin,
 		})
 	}
 	return result

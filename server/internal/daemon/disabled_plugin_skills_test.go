@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestConvertDisabledRuntimeSkillsResolvesHostPlugin(t *testing.T) {
+func TestConvertDisabledRuntimeSkillsDefersHostPluginResolution(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -35,7 +35,7 @@ func TestConvertDisabledRuntimeSkillsResolvesHostPlugin(t *testing.T) {
 		{RuntimeID: "other", Provider: "claude", Root: "plugin", Key: "paper:visible", Plugin: "paper@market"},
 	}}
 	refs := convertDisabledRuntimeSkillsForEnv(agent, "runtime", "claude")
-	if len(refs) != 1 || refs[0].PluginPath != install || refs[0].Key != "paper:hidden" {
-		t.Fatalf("host resolution: %+v", refs)
+	if len(refs) != 1 || refs[0].PluginPath != "" || refs[0].Key != "paper:hidden" {
+		t.Fatalf("conversion must not select a globally enabled install before the task cwd exists: %+v", refs)
 	}
 }

@@ -343,10 +343,15 @@ capability belongs in a bound skill, not pasted into `instructions`.
 
 Runtime-inherited skills are separate from workspace skill bindings. For Claude
 plugin skills, per-agent disabling filters skill entrypoints from a run-local
-plugin copy; it does not modify the host installation or erase prior conversation
+plugin copy selected through the runtime's native inventory in the task's actual
+directory and environment. Project/local-disabled plugins are not re-enabled;
+globally disabled or normally uninstalled plugins do not block tasks. Failed
+inventory queries, orphaned enablement and ambiguous installs require repair.
+Filtering does not modify the host installation or erase prior conversation
 content. This is discovery control, not filesystem isolation. Do not work around
 a plugin-filter preparation error by changing the user's global plugin settings.
-Plugins with installed-ID-scoped configuration/data and conflicting custom plugin
+Local-development marketplace sources, plugins with installed-ID-scoped
+configuration/data and conflicting custom plugin
 source flags require resolving the reported compatibility constraint first.
 
 ## Side effects needing approval

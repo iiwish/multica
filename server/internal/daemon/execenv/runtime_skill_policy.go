@@ -19,7 +19,7 @@ type RuntimeSkillRefForEnv struct {
 	Key    string
 	Name   string
 	Plugin string
-	// PluginPath is resolved from the runtime host's install registry, never
+	// PluginPath is resolved from the runtime's native launch-context inventory, never
 	// from API input. It is needed only for Claude plugin discovery filtering.
 	PluginPath string
 }

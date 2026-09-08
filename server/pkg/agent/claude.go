@@ -42,6 +42,11 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	if err := validateClaudePluginCopyArgs(opts); err != nil {
 		return nil, err
 	}
+	if len(opts.ClaudePluginDirs) > 0 {
+		if err := validateClaudePluginPolicyArgs(b.cfg.LaunchPrefix); err != nil {
+			return nil, err
+		}
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "claude"
@@ -718,11 +723,17 @@ func validateClaudePluginCopyArgs(opts ExecOptions) error {
 	if len(opts.ClaudePluginDirs) == 0 {
 		return nil
 	}
-	for _, args := range [][]string{opts.ExtraArgs, opts.CustomArgs} {
+	return validateClaudePluginPolicyArgs(opts.ExtraArgs, opts.CustomArgs)
+}
+
+func validateClaudePluginPolicyArgs(regions ...[]string) error {
+	for _, args := range regions {
 		for _, arg := range args {
+			arg = unshellQuoteArg(arg)
 			flag, _, _ := strings.Cut(arg, "=")
-			if flag == "--plugin-dir" || flag == "--plugin-url" || flag == "--setting-sources" || flag == "--bare" {
-				return fmt.Errorf("Claude plugin skill filtering cannot be combined with custom %s; remove the custom plugin source to use runtime skill controls", flag)
+			switch flag {
+			case "--plugin-dir", "--plugin-url", "--setting-sources", "--bare", "--worktree", "-w", "--restricted", "--safe-mode":
+				return fmt.Errorf("Claude plugin skill filtering cannot be combined with custom %s; remove the conflicting launch option to use runtime skill controls", flag)
 			}
 		}
 	}

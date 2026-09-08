@@ -183,16 +183,30 @@ func TestClaudePluginSkillsPrepareReuseAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer env.Cleanup(true)
-	if len(env.ClaudePluginDirs) != 1 || env.ClaudeSettingsPath == "" {
+	if len(env.ClaudePluginDirs) != 0 || env.ClaudeSettingsPath == "" {
 		t.Fatalf("missing policy wiring: %+v", env)
 	}
+	resolve := func(env *Environment) {
+		t.Helper()
+		params := claudePluginPolicyFixture(t)
+		params.RootDir, params.WorkDir = env.RootDir, env.WorkDir
+		params.Disabled = task.DisabledRuntimeSkills
+		params.Plugins[0].InstallPath = source
+		var err error
+		env.ClaudePluginDirs, err = PrepareClaudePluginCopies(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolve(env)
 	if err := os.WriteFile(filepath.Join(source, "skills/visible/SKILL.md"), []byte("next run"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	reused := Reuse(ReuseParams{WorkDir: env.WorkDir, Provider: "claude", Task: task}, testLogger())
-	if reused == nil || len(reused.ClaudePluginDirs) != 1 {
+	if reused == nil || len(reused.ClaudePluginDirs) != 0 {
 		t.Fatal("reuse lost plugin filter")
 	}
+	resolve(reused)
 	fresh, err := os.ReadFile(filepath.Join(reused.ClaudePluginDirs[0], "skills/visible/SKILL.md"))
 	if err != nil || string(fresh) != "next run" {
 		t.Fatalf("reuse is stale: %s, %v", fresh, err)
@@ -225,11 +239,11 @@ func TestClaudePluginSkillsReuseFailsClosed(t *testing.T) {
 	if reused := Reuse(ReuseParams{WorkDir: env.WorkDir, LocalDirectory: true, Provider: "claude", Task: task}, testLogger()); reused != nil {
 		t.Fatal("reuse without a task root bypassed filtering")
 	}
-	if reused := Reuse(ReuseParams{WorkDir: env.WorkDir, Provider: "claude", Task: task}, testLogger()); reused != nil {
-		t.Fatal("reuse ignored unresolved policy")
+	if reused := Reuse(ReuseParams{WorkDir: env.WorkDir, Provider: "claude", Task: task}, testLogger()); reused == nil || reused.ClaudeSettingsPath == "" {
+		t.Fatal("reuse must defer plugin resolution until the native query")
 	}
-	if _, err := Prepare(PrepareParams{WorkspacesRoot: t.TempDir(), WorkspaceID: "ws", TaskID: "task-plugin", Provider: "claude", Task: task}, testLogger()); err == nil {
-		t.Fatal("fresh prepare ignored unresolved policy")
+	if _, err := Prepare(PrepareParams{WorkspacesRoot: t.TempDir(), WorkspaceID: "ws", TaskID: "task-plugin", Provider: "claude", Task: task}, testLogger()); err != nil {
+		t.Fatalf("fresh prepare must defer plugin resolution: %v", err)
 	}
 }
 
