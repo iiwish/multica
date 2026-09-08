@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -25,8 +26,11 @@ func TestTaskClaudePluginHelper(t *testing.T) {
 		return
 	}
 	cwd, _ := os.Getwd()
-	want, _ := filepath.EvalSymlinks(os.Getenv("MULTICA_TEST_PLUGIN_CWD"))
-	if cwd != want || !strings.Contains(strings.Join(os.Args, " "), "plugin list --json") {
+	want := os.Getenv("MULTICA_TEST_PLUGIN_CWD")
+	actualDir, actualErr := os.Stat(cwd)
+	wantDir, wantErr := os.Stat(want)
+	if actualErr != nil || wantErr != nil || !os.SameFile(actualDir, wantDir) || !strings.Contains(strings.Join(os.Args, " "), "plugin list --json") {
+		_, _ = fmt.Fprintf(os.Stderr, "unexpected plugin query context: cwd=%q, want=%q, args=%v", cwd, want, os.Args)
 		os.Exit(3)
 	}
 	_, _ = io.WriteString(os.Stdout, os.Getenv("MULTICA_TEST_PLUGIN_INVENTORY"))

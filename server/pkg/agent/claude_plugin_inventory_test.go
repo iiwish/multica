@@ -114,11 +114,16 @@ func TestQueryClaudePluginsUsesLaunchContext(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
-	wantCwd, err := filepath.EvalSymlinks(opts.Cwd)
+	wantDir, err := os.Stat(opts.Cwd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Cwd != wantCwd || got.Config != cfg.Env["CLAUDE_CONFIG_DIR"] {
+	actualDir, err := os.Stat(got.Cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows can report an 8.3 path while EvalSymlinks returns its long name.
+	if !os.SameFile(actualDir, wantDir) || got.Config != cfg.Env["CLAUDE_CONFIG_DIR"] {
 		t.Fatalf("wrong policy context: %+v", got)
 	}
 	wantArgs := append(append([]string{}, cfg.LaunchPrefix...), "--settings", opts.ClaudeSettingsPath, "plugin", "list", "--json")
