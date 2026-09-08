@@ -341,6 +341,14 @@ its content plus its supporting files; built-in skills ship with the server and
 are loaded the same way. Both reach the provider as skill content — which is why
 capability belongs in a bound skill, not pasted into `instructions`.
 
+Runtime-inherited skills are separate from workspace skill bindings. For Claude
+plugin skills, per-agent disabling filters skill entrypoints from a run-local
+plugin copy; it does not modify the host installation or erase prior conversation
+content. This is discovery control, not filesystem isolation. Do not work around
+a plugin-filter preparation error by changing the user's global plugin settings.
+Plugins with installed-ID-scoped configuration/data and conflicting custom plugin
+source flags require resolving the reported compatibility constraint first.
+
 ## Side effects needing approval
 
 Read-only (safe): `agent get`, `agent skills list`, `agent env get`.

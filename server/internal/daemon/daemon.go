@@ -7814,6 +7814,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			}
 		}
 	}
+	defer func() {
+		if err := env.CleanupClaudePluginCopies(); err != nil {
+			taskLog.Warn("execenv: cleanup Claude plugin copies failed", "error", err)
+		}
+	}()
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from ResolveRootDir.
 	if env.RootDir != resolvedRoot && env.RootDir != "" {
@@ -8263,6 +8268,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		ServiceTier:            serviceTier,
 		OpenclawMode:           openclawMode,
 		ClaudeSettingsPath:     env.ClaudeSettingsPath,
+		ClaudePluginDirs:       env.ClaudePluginDirs,
 		QwenpawWorkspace:       env.QwenpawWorkspace,
 	}
 	// Some providers do not reliably load the per-task runtime config files we
@@ -9548,15 +9554,25 @@ func convertDisabledRuntimeSkillsForEnv(agentData *AgentData, runtimeID, provide
 		return nil
 	}
 	result := make([]execenv.RuntimeSkillRefForEnv, 0, len(agentData.DisabledRuntimeSkills))
+	var pluginPaths map[string]string
 	for _, skill := range agentData.DisabledRuntimeSkills {
 		if skill.RuntimeID != runtimeID || skill.Provider != provider {
 			continue
 		}
+		if provider == "claude" && skill.Root == localSkillRootPlugin && pluginPaths == nil {
+			pluginPaths = make(map[string]string)
+			if home, err := os.UserHomeDir(); err == nil {
+				for _, plugin := range listEnabledClaudePlugins(home) {
+					pluginPaths[plugin.ID] = plugin.InstallPath
+				}
+			}
+		}
 		result = append(result, execenv.RuntimeSkillRefForEnv{
-			Root:   skill.Root,
-			Key:    skill.Key,
-			Name:   skill.Name,
-			Plugin: skill.Plugin,
+			Root:       skill.Root,
+			Key:        skill.Key,
+			Name:       skill.Name,
+			Plugin:     skill.Plugin,
+			PluginPath: pluginPaths[skill.Plugin],
 		})
 	}
 	return result
