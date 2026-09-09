@@ -29,7 +29,8 @@ import { QuickEmojiPicker } from "@multica/ui/components/common/quick-emoji-pick
 import { cn } from "@multica/ui/lib/utils";
 import { copyText } from "@multica/ui/lib/clipboard";
 import { useActorName } from "@multica/core/workspace/hooks";
-import { useLocale, useTimeAgo } from "../../i18n";
+import { useLocale } from "../../i18n";
+import { RelativeTime } from "./relative-time";
 import { ContentEditor, type ContentEditorRef, ReadonlyContent, useFileDropZone, FileDropOverlay, Attachment as AttachmentRenderer, AttachmentDownloadProvider, useUploadGate, useComposerSubmit } from "../../editor";
 import { useCommentUploads } from "./use-comment-uploads";
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
@@ -628,7 +629,6 @@ function CommentRow({
 }) {
   const { t } = useT("issues");
   const locale = useLocale();
-  const timeAgo = useTimeAgo();
   const { getActorName } = useActorName();
 
   const edit = useEditAttachmentState(issueId, entry, onEdit);
@@ -668,7 +668,7 @@ function CommentRow({
           <TooltipTrigger
             render={
               <span className="text-caption text-muted-foreground cursor-default">
-                {timeAgo(entry.created_at)}
+                <RelativeTime dateTime={entry.created_at} />
               </span>
             }
           />
@@ -936,7 +936,6 @@ function CommentCardImpl({
 }: CommentCardProps) {
   const { t } = useT("issues");
   const locale = useLocale();
-  const timeAgo = useTimeAgo();
   const { getActorName } = useActorName();
   const isCollapsed = useCommentCollapseStore((s) => s.isCollapsed(issueId, entry.id));
   const toggleCollapse = useCommentCollapseStore((s) => s.toggle);
@@ -1052,7 +1051,7 @@ function CommentCardImpl({
                 <TooltipTrigger
                   render={
                     <span className="shrink-0 text-caption text-muted-foreground cursor-default">
-                      {timeAgo(entry.created_at)}
+                      <RelativeTime dateTime={entry.created_at} />
                     </span>
                   }
                 />
