@@ -1429,6 +1429,8 @@ func TestInjectRuntimeConfigAvailableCommandsCoreOnly(t *testing.T) {
 		"multica issue comment add --help",
 		"multica issue comment update <comment-id>",
 		"multica issue comment update --help",
+		"multica repo checkout <url> [--ref <branch-or-sha>] [--fresh]",
+		"`--fresh` discards uncommitted and untracked files",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("AGENTS.md missing core command/help text %q\n---\n%s", want, s)
@@ -4241,8 +4243,8 @@ func TestResolveWindowsSandboxStateFailsClosed(t *testing.T) {
 // warned and returned success, so the task launched with the stale
 // danger-full-access — the decision failed closed while the effective config
 // failed open. prepareCodexHomeWithOpts must now return an error, which blocks
-// startup on both paths (fresh Prepare fails the task; Reuse leaves
-// env.CodexHome unset, which configureCodexTaskShellEnvironment refuses).
+// startup on both paths (fresh Prepare fails the task; Reuse declines the
+// reuse and falls back to Prepare, which re-runs this check on a fresh home).
 func TestPrepareCodexHomeFailsClosedWhenSandboxWriteFails(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root bypasses the read-only permissions this test relies on")
@@ -6924,6 +6926,27 @@ func TestClaimEnvRootRecoversOwnerTempLeftBeforeRename(t *testing.T) {
 	}
 	if owner.WorkspaceID != "ws" || owner.TaskID != taskID {
 		t.Fatalf("owner = %#v, want recovered workspace and task identity", owner)
+	}
+}
+
+// TestReuseCodexRejectsUnusableHome pins the reuse contract for a task-local
+// Codex home that cannot be prepared: Reuse must decline (return nil) so the
+// caller falls back to Prepare, instead of handing back an environment with an
+// empty CodexHome that only fails later at launch.
+func TestReuseCodexRejectsUnusableHome(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file blocks home preparation deterministically without relying
+	// on permission checks or accessing a real Codex installation or account.
+	if err := os.WriteFile(filepath.Join(root, codexHomeDirName), []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if env := Reuse(ReuseParams{WorkDir: workDir, Provider: "codex"}, testLogger()); env != nil {
+		t.Fatalf("unusable Codex home must decline reuse, got environment with CodexHome=%q", env.CodexHome)
 	}
 }
 
