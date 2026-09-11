@@ -109,7 +109,14 @@ describe("ActivityTab Recent work loading state", () => {
     ).toBe(0);
   });
 
-  it("keeps a successful run's cleanup warning visible", async () => {
+  it.each([
+    { status: "completed", cancelled_by: undefined, label: "Succeeded" },
+    {
+      status: "cancelled",
+      cancelled_by: { type: "member", name: "Alex" },
+      label: "Cancelled by Alex",
+    },
+  ])("keeps cleanup warnings alongside $status attribution", async ({ status, cancelled_by, label }) => {
     agentTasksRef.current = () =>
       Promise.resolve([
         {
@@ -117,7 +124,8 @@ describe("ActivityTab Recent work loading state", () => {
           agent_id: "agent-1",
           runtime_id: "runtime-1",
           issue_id: "",
-          status: "completed",
+          status,
+          cancelled_by,
           priority: 0,
           dispatched_at: null,
           started_at: null,
@@ -133,5 +141,6 @@ describe("ActivityTab Recent work loading state", () => {
     renderTab();
 
     expect(await screen.findByText("Warning")).toBeInTheDocument();
+    expect(screen.getByText(label)).toBeInTheDocument();
   });
 });
