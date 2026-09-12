@@ -78,6 +78,7 @@ func TestSanitizeMiseResolvedEnv_PreservesToolsetWithoutDaemonOwnedValues(t *tes
 		"PATH":          "/mise/node/bin:/usr/bin:/bin",
 		"JAVA_HOME":     "/mise/java",
 		"HOME":          "/mise/home",
+		"DSH_HOME":      "/mise/dsh",
 		"MULTICA_TOKEN": "not-a-task-token",
 	})
 	if err != nil {
@@ -88,6 +89,9 @@ func TestSanitizeMiseResolvedEnv_PreservesToolsetWithoutDaemonOwnedValues(t *tes
 	}
 	if _, ok := got["HOME"]; ok {
 		t.Fatal("sanitized mise environment retained daemon-owned HOME")
+	}
+	if _, ok := got["DSH_HOME"]; ok {
+		t.Fatal("sanitized mise environment changed the DSH profile store")
 	}
 	if _, ok := got["MULTICA_TOKEN"]; ok {
 		t.Fatal("sanitized mise environment retained task-owned MULTICA_TOKEN")

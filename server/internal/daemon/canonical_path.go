@@ -161,6 +161,12 @@ func sanitizeMiseResolvedEnv(env map[string]string) (map[string]string, error) {
 		if !strings.EqualFold(key, "PATH") && isBlockedEnvKey(key) {
 			continue
 		}
+		// Profile presence and installation are checked in the daemon's DSH
+		// home. A different child home would make that verdict describe a
+		// different installation from the one the runtime actually uses.
+		if strings.EqualFold(key, "DSH_HOME") {
+			continue
+		}
 		clean[key] = value
 	}
 	return clean, nil
