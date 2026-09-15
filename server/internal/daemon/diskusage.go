@@ -38,6 +38,7 @@ type TaskDiskUsage struct {
 	SizeBytes          int64      `json:"size_bytes"`
 	ArtifactSizeBytes  int64      `json:"artifact_size_bytes"`
 	parentFound        *bool
+	parentCategory     string
 	orphanAgeSeconds   int64
 	orphanAgeKnown     bool
 	managedWorkDirSeen *bool
@@ -511,6 +512,7 @@ func ResolveParentStatuses(ctx context.Context, report *DiskUsageReport, fetch P
 			task.parentFound = &found
 			if status.Found {
 				task.ParentStatus = status.Status
+				task.parentCategory = status.Category
 				if !status.UpdatedAt.IsZero() {
 					updatedAt := status.UpdatedAt.UTC()
 					task.ParentUpdatedAt = &updatedAt
@@ -585,14 +587,16 @@ func ApplyDiskUsageRetentionPolicy(report *DiskUsageReport, policy *GCPolicySnap
 			applyOrphanEstimate(task, report.GeneratedAt, policy.OrphanTTLSeconds, now, RetentionParentNotAccessible)
 			continue
 		}
-		if !isKnownIssueStatus(task.ParentStatus) {
+		terminal, recognized := issueGCLifecycle(IssueGCCheckResult{
+			Status: task.ParentStatus, Category: task.parentCategory,
+		})
+		if !recognized {
 			task.RetentionReason = RetentionParentStatusUnavailable
 			continue
 		}
 
 		var eligibleAt *time.Time
 		retentionReason := RetentionParentActive
-		terminal := task.ParentStatus == "done" || task.ParentStatus == "cancelled"
 		if terminal && task.ParentUpdatedAt != nil {
 			deadline := task.ParentUpdatedAt.Add(time.Duration(policy.TTLSeconds) * time.Second)
 			eligibleAt = timePtr(deadline)

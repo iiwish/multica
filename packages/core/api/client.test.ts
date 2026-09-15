@@ -10,6 +10,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("ApiClient status reorder", () => {
+  it("opts into built-in ordering and tolerates malformed responses", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ statuses: "invalid" }), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+    const result = await client.reorderIssueStatuses("started", ["review", "qa", "progress"], true);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      category: "started", ids: ["review", "qa", "progress"], include_system: true,
+    });
+    expect(result.statuses).toEqual([]);
+  });
+});
+
 describe("ApiClient agent conversation-starter compatibility", () => {
   const prompt = {
     label: "Review a PR",
@@ -1072,6 +1087,42 @@ describe("ApiClient", () => {
     expect(tasks[1]?.usage).toBeUndefined();
     expect(tasks[2]?.usage?.[0]?.input_tokens).toBe(31_000);
     expect(tasks[2]?.usage?.[0]?.output_tokens).toBe(0);
+  });
+
+  it("keeps agent detail task history on the lightweight endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { id: "task-1", status: "completed", created_at: "2026-08-27T03:00:00Z" },
+          { id: "task-2", status: "completed", created_at: "2026-08-27T02:00:00Z" },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    const tasks = await client.listAgentTasks("agent-1");
+
+    expect(tasks.map((task) => task.id)).toEqual(["task-1", "task-2"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://api.example.test/api/agents/agent-1/tasks",
+    );
+  });
+
+  it("falls back to an empty agent task history for a malformed response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ tasks: "not-an-array" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+    await expect(client.listAgentTasks("agent-1")).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("uses the expected HTTP contract for autopilot endpoints", async () => {

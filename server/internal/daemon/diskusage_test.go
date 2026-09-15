@@ -825,6 +825,39 @@ func TestResolveParentStatuses_MissingManagedWorkDirCannotResume(t *testing.T) {
 	}
 }
 
+func TestDiskUsageRetentionUsesGCLifecycleCategory(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name, status, category, reason string
+	}{
+		{"custom closed", "custom-closed", "closed", RetentionCleanupEligible},
+		{"custom done", "custom-done", "done", RetentionCleanupEligible},
+		{"category wins over legacy done", "done", "started", RetentionParentActive},
+		{"custom unstarted", "custom-later", "unstarted", RetentionParentActive},
+		{"triage has no lifecycle", "triage", "triage", RetentionParentStatusUnavailable},
+		{"legacy cancelled", "cancelled", "", RetentionCleanupEligible},
+		{"unknown lifecycle", "future-status", "future-category", RetentionParentStatusUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := &DiskUsageReport{GeneratedAt: now, Tasks: []TaskDiskUsage{{
+				Kind: string(execenv.GCKindIssue), WorkspaceID: "ws", ParentID: "issue",
+			}}}
+			fetch := func(context.Context, string, []string, []string) (map[string]IssueGCCheckResult, map[string]TaskEnvironmentGCCheckResult, error) {
+				return map[string]IssueGCCheckResult{"issue": {
+					Found: true, Status: tc.status, Category: tc.category, UpdatedAt: now.Add(-2 * time.Hour),
+				}}, nil, nil
+			}
+			if err := ResolveParentStatuses(context.Background(), report, fetch); err != nil {
+				t.Fatal(err)
+			}
+			ApplyDiskUsageRetentionPolicy(report, &GCPolicySnapshot{Enabled: true, TTLSeconds: 3600}, now)
+			if got := report.Tasks[0].RetentionReason; got != tc.reason {
+				t.Fatalf("retention reason = %q, want %q", got, tc.reason)
+			}
+		})
+	}
+}
+
 func TestApplyDiskUsageRetentionPolicy(t *testing.T) {
 	t.Parallel()
 

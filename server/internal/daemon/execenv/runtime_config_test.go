@@ -201,10 +201,9 @@ func TestStatusRuleIsFactJudgmentAtBothMoments(t *testing.T) {
 		// on MUL-6460 proved a detached status-block bullet does not fire —
 		// the model is walking the numbered list when the condition triggers.
 		"3. If any part of what this turn will produce is what the issue itself asks for",
-		// Category-scoped skip so a custom in_progress-category status (e.g.
-		// Planning, MUL-6460) already counts as "recorded" once agents can
-		// see the catalog.
-		"already in an `in_progress`-category status",
+		// Only the exact built-in key satisfies this workflow step. The
+		// started category also contains review and blocked statuses.
+		"already `in_progress`",
 		"the board should show the issue being worked while you work, not only after",
 		// No assignee gate: the judgment applies to whoever is running.
 		"whoever the assignee is",
@@ -233,6 +232,8 @@ func TestStatusRuleIsFactJudgmentAtBothMoments(t *testing.T) {
 	// timing that hides a long first work turn in todo.
 	for _, banned := range []string{
 		"Turn mode",
+		"already in an `in_progress`-category status",
+		"already in a `started`-category status",
 		"Ownership mode",
 		"Reply mode",
 		"when this issue is assigned to you and this turn does substantive work on it",
@@ -2171,7 +2172,9 @@ func TestBriefSkillsListIsNamesOnly(t *testing.T) {
 }
 
 // TestBriefIssuePointerFollowsTheInstalledSkill covers the compatibility
-// direction the server cannot reach (MUL-6986).
+// direction the server cannot reach (MUL-6986). The brief carried two
+// pointers at this skill; MUL-6966 retired the metadata one, so the
+// sub-issue pointer is now the single subject here.
 //
 // The brief is assembled here, in the daemon, from a binary the user installs
 // on their own schedule. A backend deploy does not rewrite it, and an app
@@ -2237,7 +2240,6 @@ func TestBriefIssuePointerFollowsTheInstalledSkill(t *testing.T) {
 			for _, always := range []string{
 				"`--status todo` starts an agent-assigned child immediately",
 				"`--stage <N>` groups children into ordered stages",
-				"never secrets or long content",
 			} {
 				if !strings.Contains(out, always) {
 					t.Errorf("brief lost unconditional content %q", always)
@@ -2245,15 +2247,10 @@ func TestBriefIssuePointerFollowsTheInstalledSkill(t *testing.T) {
 			}
 
 			if tc.want == "" {
-				for _, banned := range []string{"Full write discipline:", "Before creating sub-issues, read"} {
-					if strings.Contains(out, banned) {
-						t.Errorf("brief points at a skill with none installed (%q):\n%s", banned, out)
-					}
+				if strings.Contains(out, "Before creating sub-issues, read") {
+					t.Errorf("brief points at a skill with none installed:\n%s", out)
 				}
 				return
-			}
-			if !strings.Contains(out, "Full write discipline: "+tc.want+".") {
-				t.Errorf("metadata pointer does not name %q:\n%s", tc.want, out)
 			}
 			if !strings.Contains(out, "Before creating sub-issues, read "+tc.want+" —") {
 				t.Errorf("sub-issue pointer does not name %q:\n%s", tc.want, out)
