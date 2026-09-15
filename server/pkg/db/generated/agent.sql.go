@@ -5728,7 +5728,18 @@ WHERE recovery.author_type = 'system'
   AND source.autopilot_run_id IS NULL
   AND source.issue_id IS NOT NULL
   AND source.agent_id <> failed.agent_id
-  AND COALESCE(source_status.category, source_issue.status) NOT IN ('done', 'cancelled', 'backlog')
+  -- Match canDispatchDelegatedFailureRecovery: lifecycle permits recovery only
+  -- for open work; parking belongs exclusively to the fixed Backlog status.
+  -- Built-ins resolve without catalog rows; unknown custom states stay pending.
+  AND source_issue.status <> 'backlog'
+  AND CASE
+      WHEN source_issue.status IN ('backlog', 'todo') THEN 'unstarted'
+      WHEN source_issue.status IN ('in_progress', 'in_review', 'blocked') THEN 'started'
+      WHEN source_issue.status = 'done' THEN 'done'
+      WHEN source_issue.status = 'cancelled' THEN 'closed'
+      WHEN source_issue.status = 'triage' THEN 'triage'
+      ELSE issue_status_category(source_status.category)
+  END IN ('unstarted', 'started')
   AND source_agent.archived_at IS NULL
   AND source_agent.runtime_id IS NOT NULL
   AND source_agent.workspace_id = source_issue.workspace_id
@@ -5777,7 +5788,8 @@ LIMIT $1
 // that one condition is recorded as durable state instead of being re-proven
 // through four joins and two NOT EXISTS subqueries on every tick. The predicate
 // of idx_comment_delegated_failure_unsettled matches the first four conditions,
-// so LIMIT now bounds the rows CHECKED and not just the rows RETURNED.
+// narrowing the scan to unsettled signals. Reversible eligibility must still
+// be checked before LIMIT so paused signals cannot starve executable ones.
 func (q *Queries) ListPendingDelegatedFailureRecoveries(ctx context.Context, maxPerTick int32) ([]Comment, error) {
 	rows, err := q.db.Query(ctx, listPendingDelegatedFailureRecoveries, maxPerTick)
 	if err != nil {
