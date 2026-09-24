@@ -140,6 +140,27 @@ export function formatTokens(n: number): string {
   return `${Number(scaled.toFixed(1))}${unit.suffix}`;
 }
 
+/**
+ * Whole-number prompt-cache hit rate across mutually exclusive input buckets.
+ * Callers must sum each bucket before calling so the result is a ratio of sums,
+ * never an average of per-row percentages. Output tokens are not input-side
+ * traffic and therefore do not belong in the denominator.
+ *
+ * Returns null when no input-side usage was reported. Round ordinary values to
+ * the nearest percent, but reserve 100% for a genuinely complete cache hit.
+ */
+export function cacheHitRatePercent(
+  inputTokens: number,
+  cacheReadTokens: number,
+  cacheWriteTokens: number,
+): number | null {
+  const inputSideTokens = inputTokens + cacheReadTokens + cacheWriteTokens;
+  if (inputSideTokens <= 0) return null;
+
+  const percent = (cacheReadTokens / inputSideTokens) * 100;
+  return percent === 100 ? 100 : Math.min(Math.round(percent), 99);
+}
+
 // Cents below $100, whole dollars above — two decimals on a four-figure spend
 // is noise, and dropping them below $100 would round most single runs to $0.
 export function formatUsd(n: number): string {

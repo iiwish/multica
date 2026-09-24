@@ -7,6 +7,7 @@ import {
   aggregateByDate,
   aggregateByWeek,
   aggregateCostByModel,
+  cacheHitRatePercent,
   collectUnmappedModels,
   computeCostInWindow,
   estimateCost,
@@ -32,6 +33,21 @@ const zeroUsage = {
   cache_read_tokens: 0,
   cache_write_tokens: 0,
 };
+
+describe("cacheHitRatePercent", () => {
+  it("includes cache writes in the input-side denominator", () => {
+    expect(cacheHitRatePercent(0, 72, 28)).toBe(72);
+  });
+
+  it("does not round an incomplete hit rate up to 100%", () => {
+    expect(cacheHitRatePercent(45, 9_955, 0)).toBe(99);
+    expect(cacheHitRatePercent(0, 10_000, 0)).toBe(100);
+  });
+
+  it("returns null when there are no input-side tokens", () => {
+    expect(cacheHitRatePercent(0, 0, 0)).toBeNull();
+  });
+});
 
 describe("isSelfHealingRuntime", () => {
   function makeRuntime(overrides: Partial<AgentRuntime>): AgentRuntime {
