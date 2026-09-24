@@ -26,9 +26,7 @@ func newOpenclawCacheFixture(t *testing.T) *openclawCacheFixture {
 	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "openclaw")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write fake openclaw binary: %v", err)
-	}
+	writeTestExecutable(t, bin, []byte("#!/bin/sh\nexit 0\n"))
 	configPath := filepath.Join(dir, "openclaw.json")
 	if err := os.WriteFile(configPath, []byte(`{ "agents": { "list": [] } }`), 0o600); err != nil {
 		t.Fatalf("write user config: %v", err)
@@ -144,9 +142,7 @@ func TestOpenclawDiscoveryCacheInvalidatesOnBinaryChange(t *testing.T) {
 	f := newOpenclawCacheFixture(t)
 	f.run(t)
 
-	if err := os.WriteFile(f.bin, []byte("#!/bin/sh\n# upgraded\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("rewrite fake binary: %v", err)
-	}
+	writeTestExecutable(t, f.bin, []byte("#!/bin/sh\n# upgraded\nexit 0\n"))
 
 	if got := f.run(t); got != 2 {
 		t.Errorf("preparation after a binary upgrade made %d CLI calls, want 2 (cache must be invalid)", got)
@@ -313,7 +309,7 @@ func TestOpenclawDiscoveryCacheFutureDatedEntry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOpenclawCacheFixture(t)
 			readerNow := time.Now()
-			if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, nil, f.configPath, []any{map[string]any{"id": "scout"}}, false, readerNow.Add(tc.ahead)); err != nil {
+			if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, nil, f.configPath, []any{map[string]any{"id": "scout"}}, openclawAgentsSourceList, readerNow.Add(tc.ahead)); err != nil {
 				t.Fatalf("store: %v", err)
 			}
 			if _, ok := loadOpenclawDiscoveryCache(f.cachePath(), f.bin, nil, readerNow); ok != tc.want {
@@ -338,7 +334,7 @@ func TestOpenclawDiscoveryCacheInvalidatesOnCommandEnvironmentChange(t *testing.
 		"PATH":               "/mise/node-b/bin:/usr/bin:/bin",
 		"OPENCLAW_API_TOKEN": "cache-secret",
 	}
-	if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, envA, f.configPath, nil, false, now); err != nil {
+	if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, envA, f.configPath, nil, openclawAgentsSourceList, now); err != nil {
 		t.Fatalf("store: %v", err)
 	}
 	if raw, err := os.ReadFile(f.cachePath()); err != nil {
@@ -380,7 +376,7 @@ func TestOpenclawDiscoveryCacheConcurrentPreparations(t *testing.T) {
 			// Each worker gets its own stub-free path into discovery: the
 			// shared stub is not goroutine-safe, so drive the cache directly
 			// with the same store/load pair preparation uses.
-			if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, nil, f.configPath, []any{map[string]any{"id": "scout"}}, false, time.Now()); err != nil {
+			if err := storeOpenclawDiscoveryCache(f.cachePath(), f.bin, nil, f.configPath, []any{map[string]any{"id": "scout"}}, openclawAgentsSourceList, time.Now()); err != nil {
 				mu.Lock()
 				failures = append(failures, err)
 				mu.Unlock()

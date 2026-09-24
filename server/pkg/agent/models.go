@@ -189,7 +189,7 @@ func ListModels(ctx context.Context, providerType string, runtimeCmd Command) (C
 		})
 	case "codex":
 		return cachedDiscovery(discoveryCacheKey(providerType, runtimeCmd), func() (Catalog, error) {
-			return discovered(discoverCodexModels(ctx, runtimeCmd), nil)
+			return discoverCodexCatalog(ctx, runtimeCmd), nil
 		})
 	case "antigravity":
 		// agy 1.0.6 added a `--model` flag plus an `agy models` catalog
@@ -426,11 +426,12 @@ func ModelSelectionSupported(providerType string) bool {
 }
 
 // ModelKnownIncompatibleWithProvider reports whether a saved model is a known
-// mismatch for a target runtime provider. For first-party providers with
-// maintained static catalogs, compatibility is exact: the model must be one of
-// the IDs that runtime advertises. Unknown/custom model strings still return
-// false because the UI and CLI allow manual entries and the server should not
-// erase values it cannot confidently classify.
+// mismatch for a target runtime provider. Static catalogs are sufficient to
+// recognize known-good IDs, but they are not allow-lists: Claude and Codex can
+// gain same-family model IDs through live discovery without a Multica release.
+// Unknown/custom model strings still return false because the UI and CLI allow
+// manual entries and the server should not erase values it cannot confidently
+// classify.
 func ModelKnownIncompatibleWithProvider(providerType, model string) bool {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -443,6 +444,17 @@ func ModelKnownIncompatibleWithProvider(providerType, model string) bool {
 	}
 	if accepted[modelIDForCapabilityLookup(providerType, model)] {
 		return false
+	}
+	lookupID := modelIDForCapabilityLookup(providerType, model)
+	switch providerType {
+	case "claude":
+		if strings.HasPrefix(lookupID, "claude-") && !strings.ContainsAny(lookupID, "[]") {
+			return false
+		}
+	case "codex":
+		if strings.HasPrefix(lookupID, "gpt-") || isOpenAIReasoningSeriesID(lookupID) {
+			return false
+		}
 	}
 	return isRuntimeSpecificModelID(model)
 }
@@ -586,7 +598,7 @@ func claudeStaticModels() []Model {
 }
 
 // codexStaticModels is the fallback for Codex versions older than 0.122.0
-// and for failed/malformed `codex debug models --bundled` calls. Keep it in
+// and for failed/malformed live and bundled discovery calls. Keep it in
 // sync with the visible entries in the newest locally verified bundled
 // catalog, plus still-common models from older Codex releases. Each entry
 // carries its own reasoning catalog so old/offline CLIs retain the same model
@@ -1015,7 +1027,7 @@ func discoverPiModelsWithin(ctx context.Context, runtimeCmd Command, rpcTimeout,
 	}
 	lookedUp, err := exec.LookPath(runtimeCmd.Path)
 	if err != nil {
-		return []Model{}, nil
+		return nil, fmt.Errorf("pi model discovery: %w", err)
 	}
 	// Split the established 15-second discovery budget so an RPC surface that
 	// accepts the mode but never answers cannot starve the compatibility table
@@ -1218,14 +1230,16 @@ func discoverPiModelsTable(ctx context.Context, runtimeCmd Command) ([]Model, er
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	stdout, err := outputOwned(cmd, runtimeCmd.logger)
-	if err != nil && len(stdout) == 0 && stderr.Len() == 0 {
-		return []Model{}, nil
-	}
+
 	text := string(stdout)
 	if strings.TrimSpace(text) == "" {
 		text = stderr.String()
 	}
-	return parsePiModels(text), nil
+	models := parsePiModels(text)
+	if len(models) == 0 && err != nil {
+		return nil, fmt.Errorf("pi model discovery: RPC probe failed; --list-models: %w: %s", err, strings.TrimSpace(text))
+	}
+	return models, nil
 }
 
 // parsePiModels accepts the `pi --list-models` output. Pi historically
@@ -1343,15 +1357,17 @@ func discoverOmpModels(ctx context.Context, runtimeCmd Command) ([]Model, error)
 		runtimeCmd.Path = "omp"
 	}
 	if _, err := exec.LookPath(runtimeCmd.Path); err != nil {
-		return []Model{}, nil
+		return nil, fmt.Errorf("omp model discovery: %w", err)
 	}
 	runCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := runtimeCmd.exec(runCtx, "models", "--json")
 	hideAgentWindow(cmd)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	stdout, err := outputOwned(cmd, runtimeCmd.logger)
-	if err != nil || len(stdout) == 0 {
-		return []Model{}, nil
+	if err != nil {
+		return nil, fmt.Errorf("omp models --json: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return parseOmpModels(stdout)
 }
@@ -1366,13 +1382,17 @@ func discoverOmpModels(ctx context.Context, runtimeCmd Command) ([]Model, error)
 // Using the bare id would let omp's internal provider priority ranking pick a
 // different backend for the same model id. Provider is kept for UI grouping.
 // The dedup key is the selector when present, falling back to provider/id.
+// Model.Thinking comes from the entry's `reasoning`/`thinking` fields — see
+// ompThinkingFromCatalogEntry for omp's own rules about what those mean.
 func parseOmpModels(data []byte) ([]Model, error) {
 	var wrapper struct {
 		Models []struct {
-			ID       string `json:"id"`
-			Provider string `json:"provider"`
-			Selector string `json:"selector"`
-			Name     string `json:"name"`
+			ID        string          `json:"id"`
+			Provider  string          `json:"provider"`
+			Selector  string          `json:"selector"`
+			Name      string          `json:"name"`
+			Reasoning bool            `json:"reasoning"`
+			Thinking  json.RawMessage `json:"thinking"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -1406,9 +1426,72 @@ func parseOmpModels(data []byte) ([]Model, error) {
 		if label == "" {
 			label = selector
 		}
-		models = append(models, Model{ID: selector, Label: label, Provider: provider})
+		models = append(models, Model{
+			ID:       selector,
+			Label:    label,
+			Provider: provider,
+			Thinking: ompThinkingFromCatalogEntry(e.Reasoning, e.Thinking),
+		})
 	}
 	return models, nil
+}
+
+// ompThinkingFromCatalogEntry maps one `omp models --json` entry's reasoning
+// metadata onto Multica's per-model effort catalog.
+//
+// The rules are omp's own, verified against can1357/oh-my-pi v18.2.0:
+//
+//   - `models --json` emits `thinking` as a concrete effort array or `null`,
+//     never an object — see ModelJson/toModelJson in cli/models-cli.ts.
+//   - omp's Effort vocabulary is minimal|low|medium|high|xhigh|max. `off` is
+//     NOT an effort and so never appears in that array (catalog/src/effort.ts).
+//   - `reasoning: true` with `thinking: null` means "reasons, but exposes no
+//     controllable effort dial": getSupportedEfforts documents that exact case.
+//     Inferring efforts there would offer levels omp then clamps away, which is
+//     the silent mismatch MUL-7412 exists to remove.
+//   - `off` is honoured for any model whatever its effort array, because
+//     resolveThinkingLevelForModel returns it before clamping runs
+//     (coding-agent/src/thinking.ts).
+//
+// So a reasoning model gets `off` plus exactly the efforts the catalog
+// advertised, and nothing inferred. A non-reasoning model gets no picker at
+// all, matching how Multica hides pi's inert `off`-only control.
+//
+// `auto` is deliberately excluded: omp keeps AUTO_THINKING as a session-level
+// sentinel that is explicitly never an Effort or ThinkingLevel and is resolved
+// per turn, so it is not a per-model capability, and providerThinkingEnums
+// rejects it (MUL-7412).
+func ompThinkingFromCatalogEntry(reasoning bool, raw json.RawMessage) *ModelThinking {
+	if !reasoning {
+		return nil
+	}
+	// `off` is always available; the catalog only ever adds efforts on top.
+	advertised := map[string]bool{"off": true}
+	for _, effort := range parseOmpEfforts(raw) {
+		advertised[strings.TrimSpace(effort)] = true
+	}
+	levels := make([]ThinkingLevel, 0, len(piThinkingLevelOrder))
+	for _, value := range piThinkingLevelOrder {
+		if advertised[value] {
+			levels = append(levels, ThinkingLevel{Value: value, Label: piThinkingLevelLabels[value]})
+		}
+	}
+	return &ModelThinking{SupportedLevels: levels}
+}
+
+// parseOmpEfforts reads the effort array out of a catalog entry's `thinking`
+// field. An absent field, `null`, and any shape that is not an array of strings
+// all yield no efforts: a payload we cannot read is not evidence that the model
+// supports anything.
+func parseOmpEfforts(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var efforts []string
+	if err := json.Unmarshal(raw, &efforts); err != nil {
+		return nil
+	}
+	return efforts
 }
 
 // discoverHermesModels spins up a throwaway `hermes acp` process,

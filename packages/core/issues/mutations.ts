@@ -9,7 +9,7 @@ import {
 import { api } from "../api";
 import { issueKeys } from "./queries";
 import { projectKeys } from "../projects/queries";
-import { inboxKeys } from "../inbox/queries";
+import { inboxKeys, type ArchivedInboxCache } from "../inbox/queries";
 import {
   cancelInboxLists,
   isInboxListRequestInFlight,
@@ -37,7 +37,7 @@ import {
 } from "./delete-cache";
 import { useWorkspaceId } from "../hooks";
 import { useRecentContextStore } from "../chat/recent-context-store";
-import { useRecentIssuesStore } from "./stores";
+import { useRecentIssuesStore, useTaskSupplementDraftStore } from "./stores";
 import type { InboxItem, Issue, IssueReaction } from "../types";
 import type {
   CreateCommentSubIssueManualRequest,
@@ -48,6 +48,8 @@ import type {
 } from "../types";
 import type { TimelineEntry, IssueSubscriber, Reaction } from "../types";
 import { sortTimelineEntriesAsc } from "./timeline-sort";
+import { applyCommentDeletion, removeCommentSubtree } from "./comment-deletion";
+import { configStore } from "../config";
 import {
   onIssueAuxiliaryRevision,
   invalidateIssueOwnerProjections,
@@ -204,6 +206,7 @@ export function useUpdateIssue() {
       // a rapid follow-up edit. mutationFn still sends the full payload.
       const {
         suppress_run: _suppressRun,
+        duplicate_of_issue_id: _duplicateOfIssueId,
         description: _description,
         description_base: _descriptionBase,
         title_base: _titleBase,
@@ -315,6 +318,7 @@ export function useUpdateIssue() {
       // is the plain surgical patch it always was.
       const {
         suppress_run: _suppressRun,
+        duplicate_of_issue_id: _duplicateOfIssueId,
         description_base: _descriptionBase,
         move_intent: _moveIntent,
         id: _id,
@@ -374,6 +378,14 @@ export function useUpdateIssue() {
       // payload mutates the attachment join table.
       if (vars.attachment_ids?.length) {
         qc.invalidateQueries({ queryKey: issueKeys.attachments(vars.id) });
+      }
+      // A duplicate mark is not on Issue; refresh both sides now rather than
+      // waiting for the realtime echo.
+      if (vars.duplicate_of_issue_id) {
+        qc.invalidateQueries({ queryKey: issueKeys.duplicates(wsId, vars.id) });
+        qc.invalidateQueries({
+          queryKey: issueKeys.duplicates(wsId, vars.duplicate_of_issue_id),
+        });
       }
       // Invalidate old parent's children cache
       if (ctx?.parentId) {
@@ -537,7 +549,7 @@ export function useBatchUpdateIssues() {
       >();
       const prevDetailById = new Map<string, Issue>();
       let prevInboxList: InboxItem[] | undefined;
-      let prevArchivedInboxList: InboxItem[] | undefined;
+      let prevArchivedInboxCaches: [QueryKey, ArchivedInboxCache | undefined][] | undefined;
       const staleKeys: QueryKey[] = [];
       for (const id of ids) {
         const base = qc.getQueryData<Issue>(issueKeys.detail(wsId, id));
@@ -566,10 +578,10 @@ export function useBatchUpdateIssues() {
           prevInboxList = change.prevInboxList;
         }
         if (
-          prevArchivedInboxList === undefined &&
-          change.prevArchivedInboxList !== undefined
+          prevArchivedInboxCaches === undefined &&
+          change.prevArchivedInboxCaches !== undefined
         ) {
-          prevArchivedInboxList = change.prevArchivedInboxList;
+          prevArchivedInboxCaches = change.prevArchivedInboxCaches;
         }
         staleKeys.push(...change.staleKeys);
       }
@@ -599,7 +611,7 @@ export function useBatchUpdateIssues() {
         prevTableRows: [...prevTableRowByHash.values()],
         prevDetailById,
         prevInboxList,
-        prevArchivedInboxList,
+        prevArchivedInboxCaches,
         inboxWrite,
         staleKeys,
         prevChildren,
@@ -630,11 +642,8 @@ export function useBatchUpdateIssues() {
       if (ctx?.prevInboxList !== undefined) {
         qc.setQueryData(inboxKeys.list(wsId), ctx.prevInboxList);
       }
-      if (ctx?.prevArchivedInboxList !== undefined) {
-        qc.setQueryData(
-          inboxKeys.archived(wsId),
-          ctx.prevArchivedInboxList,
-        );
+      for (const [key, snapshot] of ctx?.prevArchivedInboxCaches ?? []) {
+        qc.setQueryData(key, snapshot);
       }
       if (ctx?.prevChildren) {
         for (const [parentId, snapshot] of ctx.prevChildren) {
@@ -930,41 +939,24 @@ export function useDeleteComment(issueId: string) {
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
   return useMutation({
-    mutationFn: (commentId: string) => api.deleteComment(commentId),
-    onMutate: async (commentId) => {
-      await qc.cancelQueries({ queryKey: issueKeys.timeline(issueId) });
-      const prev = qc.getQueryData<TimelineCache>(issueKeys.timeline(issueId));
-
-      // Cascade: collect all descendants of the deleted comment.
-      const toRemove = new Set<string>([commentId]);
-      if (prev) {
-        let changed = true;
-        while (changed) {
-          changed = false;
-          for (const e of prev) {
-            if (
-              e.parent_id &&
-              toRemove.has(e.parent_id) &&
-              !toRemove.has(e.id)
-            ) {
-              toRemove.add(e.id);
-              changed = true;
-            }
-          }
-        }
-      }
-
-      qc.setQueryData<TimelineCache>(issueKeys.timeline(issueId), (old) =>
-        old?.filter((e) => !toRemove.has(e.id)),
-      );
-      return { prev };
+    // The capability is read when the delete runs, so the route matches the
+    // copy the confirmation showed. Older servers delete the replies too.
+    mutationFn: async (commentId: string) => {
+      const keepReplies = configStore.getState().commentDeleteKeepRepliesSupported;
+      await api.deleteComment(commentId, { keepReplies });
+      return keepReplies;
     },
-    onError: (_err, _id, ctx) => {
-      if (ctx?.prev !== undefined) {
-        qc.setQueryData(issueKeys.timeline(issueId), ctx.prev);
-      }
-    },
-    onSuccess: () => {
+    // Not optimistic: whether the comment disappears or stays as a tombstone
+    // depends on replies only the server sees for certain (#8296). Once it
+    // confirms, mirror its outcome; realtime events and the settle refetch
+    // reconcile the rest.
+    onSuccess: (keptReplies, commentId) => {
+      qc.setQueryData<TimelineCache>(issueKeys.timeline(issueId), (old) => {
+        if (!old) return old;
+        return keptReplies
+          ? applyCommentDeletion(old, commentId, new Date().toISOString())
+          : removeCommentSubtree(old, commentId);
+      });
       // The endpoint remains 204 for compatibility, so the local caller has
       // no body carrying issue_revision. The realtime event will narrow this
       // with its revision when connected; this is the no-WS safety net.
@@ -1213,6 +1205,60 @@ export function useCancelIssueRun(issueId: string) {
   return useMutation({
     mutationFn: (taskId: string) => api.cancelTask(issueId, taskId),
     onSuccess: () => client.invalidateQueries({ queryKey: issueKeys.tasks(issueId) }),
+  });
+}
+
+export function useCreateTaskSupplement(issueId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, content, clientRequestId }: {
+      taskId: string;
+      content: string;
+      clientRequestId: string;
+    }) => api.createTaskSupplement(issueId, taskId, content, clientRequestId),
+    onSuccess: (comment, { taskId, clientRequestId }) => {
+      // Re-anchoring the run can unmount its composer before this response.
+      // Clear the submitted draft here, without discarding any newer edits.
+      const drafts = useTaskSupplementDraftStore.getState();
+      if (drafts.drafts[taskId]?.clientRequestId === clientRequestId) {
+        drafts.clear(taskId);
+      }
+      const entry: TimelineEntry = {
+        type: "comment",
+        id: comment.id,
+        actor_type: comment.author_type,
+        actor_id: comment.author_id,
+        content: comment.content,
+        parent_id: comment.parent_id,
+        comment_type: comment.type,
+        reactions: comment.reactions ?? [],
+        attachments: comment.attachments ?? [],
+        created_at: comment.created_at,
+        updated_at: comment.updated_at,
+        supplement_task_id: comment.supplement_task_id,
+        supplement_status: comment.supplement_status,
+        supplement_failure_reason: comment.supplement_failure_reason,
+        supplement_delivered_at: comment.supplement_delivered_at,
+      };
+      client.setQueryData<TimelineCache>(issueKeys.timeline(issueId), (old) => {
+        if (!old) return [entry];
+        if (old.some((item) => item.id === entry.id)) return old;
+        return sortTimelineEntriesAsc([...old, entry]);
+      });
+      client.invalidateQueries({ queryKey: issueKeys.tasks(issueId) });
+    },
+  });
+}
+
+export function useRetryTaskSupplement(issueId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ taskId, commentId }: { taskId: string; commentId: string }) =>
+      api.retryTaskSupplement(issueId, taskId, commentId),
+    onSettled: () => {
+      client.invalidateQueries({ queryKey: issueKeys.timeline(issueId) });
+      client.invalidateQueries({ queryKey: issueKeys.tasks(issueId) });
+    },
   });
 }
 

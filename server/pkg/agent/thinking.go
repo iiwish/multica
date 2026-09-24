@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -245,25 +246,24 @@ func projectClaudeLevels(superset []string, allow map[string]bool) []ThinkingLev
 
 // ── Codex ────────────────────────────────────────────────────────────
 //
-// `codex debug models --bundled` is the structured discovery hook for the
-// visible model catalog, each model's reasoning catalog, and service tiers. OpenAI added
-// the command and `--bundled` flag together in Codex 0.122.0 (openai/codex
-// #18625). Older versions, failed invocations, and malformed/empty payloads
-// use codexStaticModels so the picker remains usable.
+// `codex debug models` is the structured discovery hook for the live visible
+// model catalog, each model's reasoning catalog, and service tiers. OpenAI
+// added the command in Codex 0.122.0 (openai/codex #18625). Older versions,
+// failed invocations, and malformed/empty payloads use the bundled catalog and
+// then codexStaticModels so the picker remains usable offline.
 //
 // We prefer this over the older config-error probe trick because:
 //   1. It gives us per-model subsets without hand-maintained tables.
 //   2. The schema is structured and has been stable since its 0.122.0 debut.
 //   3. It doesn't pollute stderr with an intentional misconfiguration.
 //
-// The subcommand emits JSON on stdout by default — there is no
-// `--output json` flag (a prior version of this code passed one and
-// silently failed on 0.131.0). We add `--bundled` to skip the network
-// refresh: discovery runs on every daemon poll and a network hop here
-// would block the picker behind whatever the user's connection allows.
-// The bundled catalog is what determines which `model_reasoning_effort`
-// tokens the local binary actually accepts, which is the only thing we
-// need for validation.
+// The subcommand emits JSON on stdout by default — there is no `--output json`
+// flag (a prior version of this code passed one and silently failed on
+// 0.131.0). The live form matters because Codex can receive new account-visible
+// models without a CLI release; `--bundled` only reflects the binary's compiled
+// snapshot. A failed live refresh falls back to `--bundled`, marked
+// non-authoritative so neither daemon nor server caches pin it after the
+// network recovers.
 //
 // The static fallback deliberately mirrors a recently verified bundled
 // model/thinking catalog. It does not guess service-tier availability.
@@ -290,7 +290,7 @@ const (
 )
 
 // codexDebugModelsResponse mirrors the JSON shape emitted by
-// `codex debug models --bundled` (Codex 0.122.0+). Only the fields we
+// `codex debug models` (Codex 0.122.0+). Only the fields we
 // consume are typed; unknown keys are ignored.
 type codexDebugModelsResponse struct {
 	Models []codexDebugModel `json:"models"`
@@ -316,32 +316,50 @@ type codexDebugServiceTier struct {
 	Description string `json:"description"`
 }
 
-// discoverCodexModels returns the installed Codex binary's bundled visible
+// discoverCodexCatalog returns the installed Codex binary's live visible
 // catalog, including reasoning metadata. Version detection happens before the
 // debug command so old binaries do not log a predictable "unknown command"
 // failure on every cache refresh.
-func discoverCodexModels(ctx context.Context, cmd Command) []Model {
+func discoverCodexCatalog(ctx context.Context, cmd Command) Catalog {
 	if cmd.Path == "" {
 		cmd.Path = "codex"
 	}
 	version, err := DetectVersion(ctx, cmd)
 	if err != nil {
-		return codexStaticModels()
+		return Catalog{Models: codexStaticModels(), Fallback: true}
 	}
 	supportsExplicitStandard := codexSupportsExplicitStandardServiceTier(version)
 	if !codexSupportsDebugModels(version) {
-		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
+		return Catalog{
+			Models:   annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard),
+			Fallback: true,
+		}
 	}
 
-	raw, err := runCodexDebugModels(ctx, cmd)
-	if err != nil {
-		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
+	liveCtx, cancel := context.WithTimeout(ctx, codexLiveCatalogTimeout)
+	raw, err := runCodexDebugModels(liveCtx, cmd, codexDebugModelsArgs...)
+	cancel()
+	if err == nil {
+		models, parseErr := parseCodexModelCatalog(raw)
+		if parseErr == nil && len(models) > 0 {
+			return Catalog{Models: annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard)}
+		}
 	}
-	models, err := parseCodexModelCatalog(raw)
-	if err != nil || len(models) == 0 {
-		return annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard)
+
+	raw, err = runCodexDebugModels(ctx, cmd, codexBundledDebugModelsArgs...)
+	if err == nil {
+		models, parseErr := parseCodexModelCatalog(raw)
+		if parseErr == nil && len(models) > 0 {
+			return Catalog{
+				Models:   annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard),
+				Fallback: true,
+			}
+		}
 	}
-	return annotateCodexExplicitStandardServiceTier(models, supportsExplicitStandard)
+	return Catalog{
+		Models:   annotateCodexExplicitStandardServiceTier(codexStaticModels(), supportsExplicitStandard),
+		Fallback: true,
+	}
 }
 
 func codexSupportsDebugModels(version string) bool {
@@ -374,23 +392,25 @@ func annotateCodexExplicitStandardServiceTier(models []Model, supported bool) []
 	return models
 }
 
-// codexDebugModelsArgs is the argv we pass to discover the local Codex
-// catalog. Kept as a package-level var (not a literal at the call site)
-// so tests can assert the exact form a real `codex` invocation receives,
-// not just the parser behavior on a fixture string. The argv shape is
-// the contract that broke under PR1 review; the test that pins it sits
-// in thinking_test.go.
-var codexDebugModelsArgs = []string{"debug", "models", "--bundled"}
+const codexLiveCatalogTimeout = 15 * time.Second
 
-func runCodexDebugModels(ctx context.Context, runtimeCmd Command) ([]byte, error) {
-	cmd := runtimeCmd.exec(ctx, codexDebugModelsArgs...)
+// codexDebugModelsArgs is the argv we pass for the authoritative live catalog.
+// codexBundledDebugModelsArgs is the offline fallback. Kept as package-level
+// vars so tests can assert the exact form a real `codex` invocation receives.
+var (
+	codexDebugModelsArgs        = []string{"debug", "models"}
+	codexBundledDebugModelsArgs = []string{"debug", "models", "--bundled"}
+)
+
+func runCodexDebugModels(ctx context.Context, runtimeCmd Command, args ...string) ([]byte, error) {
+	cmd := runtimeCmd.exec(ctx, args...)
 	hideAgentWindow(cmd)
 	return outputOwned(cmd, runtimeCmd.logger)
 }
 
 // parseCodexModelCatalog projects the CLI's raw catalog into the daemon wire
 // model. Hidden entries are intentionally excluded to match Codex's own model
-// picker; the first visible entry is the bundled catalog's preferred default.
+// picker; the first visible entry is the catalog's preferred default.
 func parseCodexModelCatalog(raw []byte) ([]Model, error) {
 	var resp codexDebugModelsResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -648,6 +668,8 @@ func catalogLoader(ctx context.Context, providerType string, cmd Command) func()
 //     "unknown model → reject" (the misjudgement flagged in an earlier
 //     review). opencode has no single default, so it accepts a level any
 //     advertised model supports.
+//   - omp: fails closed for the same reason by a different route — see
+//     ThinkingRequiresExplicitModel.
 //
 // The lookup goes through ListModels so it sees the *current* CLI
 // catalog (including dynamic discovery for codex), not just a static
@@ -673,11 +695,12 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 	if value == "" {
 		return true, nil
 	}
-	// Codex empty-model fail-closed (see doc comment). Checked before the
-	// catalog load so the outcome is deterministic even when discovery would
-	// error — an errored lookup makes the daemon pass the level through, which
-	// is exactly what we must NOT do for an unresolved codex model.
-	if model == "" && providerType == "codex" {
+	// Empty-model fail-closed, checked BEFORE the catalog load so the outcome is
+	// deterministic even when discovery would error. That ordering is the whole
+	// point: on a lookup error the daemon passes the level through to the CLI
+	// (see its thinking_level guard), which is exactly what must not happen for
+	// a provider whose effective model we cannot know.
+	if model == "" && ThinkingRequiresExplicitModel(providerType) {
 		return false, nil
 	}
 	catalog, err := loadCatalog()
@@ -698,6 +721,9 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 			}
 		}
 		if target == "" {
+			// opencode has no single default model, so it accepts a level any
+			// advertised model supports. Providers that instead require a pinned
+			// model never reach here — they were already rejected above.
 			if providerType == "opencode" {
 				return anyModelSupportsThinkingValue(models, value), nil
 			}
@@ -724,7 +750,48 @@ func ValidateThinkingLevelWith(loadCatalog func() (Catalog, error), providerType
 		}
 		return false, nil
 	}
+	if missingFromFallbackCatalog(catalog, providerType, model) {
+		return false, fmt.Errorf("model %q absent from fallback %s catalog; cannot validate thinking level", model, providerType)
+	}
 	return false, nil
+}
+
+// ThinkingRequiresExplicitModel reports whether a provider refuses to carry an
+// effort unless a model is pinned, because its empty-model resolution happens
+// somewhere Multica cannot observe:
+//
+//   - codex: the effective model comes from the local config.toml and can be any
+//     installed model, so borrowing the catalog's Default entry would green-light
+//     levels the configured model may not support (MUL-4347).
+//   - omp: its `models --json` catalog marks no default at all and sorts by
+//     provider/id, so no entry here is the one that would run. At task time omp
+//     resolves its own default role model and clamps the requested level to what
+//     THAT model supports, so a level validated against any other entry is not
+//     the level that runs (MUL-7412).
+//
+// Both are checked before any catalog read, so discovery failing cannot turn
+// into "pass the level through".
+func ThinkingRequiresExplicitModel(providerType string) bool {
+	switch providerType {
+	case "codex", "omp":
+		return true
+	}
+	return false
+}
+
+// ThinkingLevelRejectedWithoutModel reports whether the API should refuse to
+// STORE an effort that has no pinned model, instead of storing it and leaving
+// the daemon to drop it at launch.
+//
+// Deliberately narrower than ThinkingRequiresExplicitModel. codex shares the
+// execution constraint but predates this check: agents out there already hold an
+// effort alongside an empty model, and 400ing that combination would block
+// unrelated edits to them, so codex stays grandfathered and the daemon keeps
+// dropping the level. omp has no such history — persisting an effort at all was
+// impossible before MUL-7412 — so it is strict from the start and the invalid
+// combination never reaches storage.
+func ThinkingLevelRejectedWithoutModel(providerType string) bool {
+	return providerType == "omp"
 }
 
 // ValidateServiceTier reports whether value is advertised by the current
@@ -753,6 +820,10 @@ func ValidateServiceTierWith(loadCatalog func() (Catalog, error), providerType, 
 	if err != nil {
 		return false, err
 	}
+	// Explicit standard routing is a CLI-version capability, not a per-model
+	// capability. Resolve it before the fallback missing-model check: an old
+	// CLI must never pass "default" through just because its fallback omits
+	// the saved (live-only) model.
 	if value == codexStandardServiceTier {
 		for _, candidate := range catalog.Models {
 			if candidate.SupportsExplicitStandardServiceTier {
@@ -760,6 +831,9 @@ func ValidateServiceTierWith(loadCatalog func() (Catalog, error), providerType, 
 			}
 		}
 		return false, nil
+	}
+	if missingFromFallbackCatalog(catalog, providerType, model) {
+		return false, fmt.Errorf("model %q absent from fallback %s catalog; cannot validate service tier", model, providerType)
 	}
 	for _, m := range catalog.Models {
 		if m.ID != model {
@@ -773,6 +847,22 @@ func ValidateServiceTierWith(loadCatalog func() (Catalog, error), providerType, 
 		return false, nil
 	}
 	return false, nil
+}
+
+// Codex fallback is useful for known models, but its omissions are not
+// evidence that a live-only model lacks a capability. The daemon passes validation
+// errors through to the CLI rather than discarding a saved user override.
+func missingFromFallbackCatalog(catalog Catalog, providerType, model string) bool {
+	if providerType != "codex" || !catalog.Fallback || model == "" {
+		return false
+	}
+	target := modelIDForCapabilityLookup(providerType, model)
+	for _, candidate := range catalog.Models {
+		if modelIDForCapabilityLookup(providerType, candidate.ID) == target {
+			return false
+		}
+	}
+	return true
 }
 
 func anyModelSupportsThinkingValue(models []Model, value string) bool {
@@ -824,6 +914,20 @@ var providerThinkingEnums = map[string]map[string]bool{
 	// Pi owns a fixed CLI vocabulary; RPC discovery narrows this universe to
 	// the exact subset supported by each model before execution.
 	"pi": {
+		"off":     true,
+		"minimal": true,
+		"low":     true,
+		"medium":  true,
+		"high":    true,
+		"xhigh":   true,
+		"max":     true,
+	},
+	// omp (Oh-My-Pi) dispatches to the pi backend (see BuiltinRuntimes), so it
+	// inherits pi's fixed CLI vocabulary; discoverOmpModels narrows it to each
+	// model's advertised efforts before execution. `auto` is deliberately absent
+	// even though omp's --thinking accepts it — see ompThinkingFromCatalogEntry
+	// (MUL-7412).
+	"omp": {
 		"off":     true,
 		"minimal": true,
 		"low":     true,

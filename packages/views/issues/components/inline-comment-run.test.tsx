@@ -4,14 +4,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { api } from "@multica/core/api";
 import { chatKeys } from "@multica/core/chat/queries";
-import type { AgentTask } from "@multica/core/types";
+import { issueKeys } from "@multica/core/issues/queries";
+import { useCommentDraftStore, useTaskSupplementDraftStore } from "@multica/core/issues/stores";
+import type { AgentTask, TimelineEntry } from "@multica/core/types";
 import type { TaskMessagePayload } from "@multica/core/types/events";
 import { renderWithI18n } from "../../test/i18n";
-import { InlineCommentRun } from "./inline-comment-run";
+import { InlineCommentRun, PlacedInlineCommentRun } from "./inline-comment-run";
+import { SupplementReceipt } from "./comment-card";
+
+const dispatchReasonCodeMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/api", () => ({ api: {
   getIssue: vi.fn(), listTaskMessages: vi.fn(), cancelTask: vi.fn(), rerunIssue: vi.fn(),
-}, dispatchReasonCode: () => undefined }));
+  createTaskSupplement: vi.fn(), retryTaskSupplement: vi.fn(), listTasksByIssue: vi.fn(),
+}, dispatchReasonCode: dispatchReasonCodeMock }));
 vi.mock("@multica/core/hooks", () => ({ useWorkspaceId: () => "workspace" }));
 vi.mock("@multica/core/workspace/hooks", () => ({ useActorName: () => ({ getActorName: () => "Reviewer" }) }));
 vi.mock("../../common/actor-avatar", () => ({ ActorAvatar: () => <span /> }));
@@ -31,7 +37,12 @@ const messages: TaskMessagePayload[] = [
   { task_id: id, issue_id: "issue", seq: 1, type: "text", content: "Checking navigation." },
   { task_id: id, issue_id: "issue", seq: 2, type: "tool_use", tool: "exec_command", input: { command: "pnpm test" } },
 ];
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+  useTaskSupplementDraftStore.setState({ drafts: {} });
+  useCommentDraftStore.setState({ drafts: {} });
+});
 
 function setup(initialTask: AgentTask, hasReply = false, presentation: "inline" | "header" = "inline") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -43,6 +54,268 @@ function setup(initialTask: AgentTask, hasReply = false, presentation: "inline" 
 }
 
 describe("InlineCommentRun", () => {
+  it("creates no receipt observers for ordinary or delivered comments", () => {
+    const client = new QueryClient();
+    const entry = { id: "comment", type: "comment" } as TimelineEntry;
+    renderWithI18n(<QueryClientProvider client={client}>
+      <SupplementReceipt issueId="issue" entry={entry} />
+      <SupplementReceipt issueId="issue" entry={{ ...entry, supplement_task_id: id, supplement_status: "delivered" }} />
+    </QueryClientProvider>);
+    expect(client.getQueryCache().getAll()).toHaveLength(0);
+  });
+
+  it.each(["toggle", "cancel", "escape"])("closes and clears a running draft with %s", (action) => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+    setup(task({ supplement_capability: "task-supplement-v1", can_supplement: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    const input = screen.getByPlaceholderText("Add guidance for this running turn");
+    fireEvent.change(input, { target: { value: "Discard this draft." } });
+    if (action === "escape") fireEvent.keyDown(input, { key: "Escape" });
+    else fireEvent.click(screen.getByRole("button", { name: action === "toggle" ? "Add message" : "Cancel" }));
+    expect(screen.queryByPlaceholderText("Add guidance for this running turn")).not.toBeInTheDocument();
+    expect(useTaskSupplementDraftStore.getState().drafts[id]).toBeUndefined();
+    expect(api.createTaskSupplement).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    expect(screen.getByPlaceholderText("Add guidance for this running turn")).toHaveValue("");
+  });
+
+  it.each(["completed", "cancelled", "failed"] as const)("removes an empty panel when the run becomes %s", (status) => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+    const current = task({ supplement_capability: "task-supplement-v1", can_supplement: true });
+    const { rerender } = setup(current);
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    rerender({ ...current, status });
+    expect(screen.queryByPlaceholderText("Add guidance for this running turn")).not.toBeInTheDocument();
+    expect(useTaskSupplementDraftStore.getState().drafts[id]).toBeUndefined();
+  });
+
+  it.each(["Move to new message", "Discard"])("lets a terminal draft %s and restores the reply header", (action) => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+    const current = task({ supplement_capability: "task-supplement-v1", can_supplement: true });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = (status: AgentTask["status"], hasReply: boolean) => <QueryClientProvider client={client}>
+      <PlacedInlineCommentRun run={{ task: { ...current, status }, commentId: "reply", hasReply }} presentation="header" />
+      <PlacedInlineCommentRun run={{ task: { ...current, status }, commentId: "reply", hasReply }} />
+    </QueryClientProvider>;
+    const rendered = renderWithI18n(view("running", false));
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    fireEvent.change(screen.getByPlaceholderText("Add guidance for this running turn"), { target: { value: "Preserve this only on move." } });
+    rendered.rerender(view("completed", true));
+    expect(screen.getByRole("button", { name: "Move to new message" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    expect(useTaskSupplementDraftStore.getState().drafts[id]).toBeUndefined();
+    expect(useCommentDraftStore.getState().getDraft("new:issue")).toBe(action === "Discard" ? undefined : "Preserve this only on move.");
+    expect(screen.queryByPlaceholderText("Add guidance for this running turn")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open full log" })).toBeInTheDocument();
+    expect(api.createTaskSupplement).not.toHaveBeenCalled();
+  });
+
+  it("hides additional messages without negotiated support", () => {
+    const { client } = setup(task());
+    expect(screen.queryByRole("button", { name: "Add message" })).not.toBeInTheDocument();
+    client.clear();
+  });
+
+  it("disables additional messages when support is negotiated but permission is denied", () => {
+    const { client } = setup(task({ supplement_capability: "task-supplement-v1", can_supplement: false }));
+    expect(screen.getByRole("button", { name: "Add message" })).toBeDisabled();
+    client.clear();
+  });
+  it("preserves additional-message text when delivery submission fails", async () => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+    vi.mocked(api.createTaskSupplement).mockRejectedValue(new Error("run ended"));
+    setup(task({ supplement_capability: "task-supplement-v1", can_supplement: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    const input = screen.getByPlaceholderText("Add guidance for this running turn");
+    fireEvent.change(input, { target: { value: "preserve this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.createTaskSupplement).toHaveBeenCalled());
+    expect(input).toHaveValue("preserve this draft");
+  });
+
+  it.each([false, true])("settles a sent draft after the run remounts (edited: %s)", async (edited) => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+    const comment = {
+      id: "supplement-comment", issue_id: "issue", author_type: "member" as const, author_id: "user",
+      content: "Create a rollback note.", type: "comment" as const, parent_id: null, reactions: [], attachments: [],
+      created_at: "2026-09-07T00:00:10Z", updated_at: "2026-09-07T00:00:10Z",
+      resolved_at: null, resolved_by_type: null, resolved_by_id: null,
+      supplement_task_id: id, supplement_status: "pending" as const,
+    };
+    let resolveRequest!: (value: typeof comment) => void;
+    const request = new Promise<typeof comment>((resolve) => { resolveRequest = resolve; });
+    vi.mocked(api.createTaskSupplement).mockReturnValue(request);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const current = task({ supplement_capability: "task-supplement-v1", can_supplement: true });
+    const view = (commentId: string) => <QueryClientProvider client={client}>
+      <PlacedInlineCommentRun key={commentId} run={{ task: current, commentId, hasReply: false }} />
+    </QueryClientProvider>;
+    const rendered = renderWithI18n(view("comment"));
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    const input = screen.getByPlaceholderText("Add guidance for this running turn");
+    fireEvent.change(input, { target: { value: comment.content } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.createTaskSupplement).toHaveBeenCalledWith(
+      "issue", id, comment.content, expect.any(String),
+    ));
+
+    // A realtime comment can re-anchor the run before the send response arrives.
+    rendered.rerender(view(comment.id));
+    const remountedInput = screen.getByPlaceholderText("Add guidance for this running turn");
+    expect(remountedInput).not.toBe(input);
+    expect(remountedInput).toHaveValue(comment.content);
+    if (edited) fireEvent.change(remountedInput, { target: { value: "A newer unsent draft." } });
+
+    await act(async () => resolveRequest(comment));
+    await waitFor(() => expect(client.getMutationCache().getAll()[0]?.state.status).toBe("success"));
+    if (edited) {
+      expect(screen.getByPlaceholderText("Add guidance for this running turn")).toHaveValue("A newer unsent draft.");
+    } else {
+      expect(screen.queryByPlaceholderText("Add guidance for this running turn")).not.toBeInTheDocument();
+      expect(useTaskSupplementDraftStore.getState().drafts[id]).toBeUndefined();
+      fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+      expect(screen.getByPlaceholderText("Add guidance for this running turn")).toHaveValue("");
+    }
+    client.clear();
+  });
+
+  it("keeps the task draft through reply placement changes and a full remount", () => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = (hasReply: boolean) => <QueryClientProvider client={client}>
+      <PlacedInlineCommentRun run={{ task: task({ supplement_capability: "task-supplement-v1", can_supplement: true }), commentId: "reply", hasReply }} presentation="header" />
+      <PlacedInlineCommentRun run={{ task: task({ supplement_capability: "task-supplement-v1", can_supplement: true }), commentId: "reply", hasReply }} />
+    </QueryClientProvider>;
+    const rendered = renderWithI18n(view(false));
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    fireEvent.change(screen.getByPlaceholderText("Add guidance for this running turn"), {
+      target: { value: "Create remount-proof evidence." },
+    });
+
+    rendered.rerender(view(true));
+    expect(screen.getByPlaceholderText("Add guidance for this running turn")).toHaveValue("Create remount-proof evidence.");
+    rendered.unmount();
+
+    renderWithI18n(view(true));
+    expect(screen.getByPlaceholderText("Add guidance for this running turn")).toHaveValue("Create remount-proof evidence.");
+    expect(screen.queryByRole("button", { name: "Open full log" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a 409 draft and moves it explicitly to the new-message composer", async () => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue([]);
+    dispatchReasonCodeMock.mockReturnValue("task_supplement_turn_ended");
+    vi.mocked(api.createTaskSupplement).mockRejectedValue(new Error("ended"));
+    setup(task({ supplement_capability: "task-supplement-v1", can_supplement: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Add message" }));
+    const input = screen.getByPlaceholderText("Add guidance for this running turn");
+    fireEvent.change(input, { target: { value: "Create retained.txt." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const move = await screen.findByRole("button", { name: "Move to new message" });
+    expect(input).toHaveValue("Create retained.txt.");
+    fireEvent.click(move);
+    expect(useCommentDraftStore.getState().getDraft("new:issue")).toBe("Create retained.txt.");
+    expect(useTaskSupplementDraftStore.getState().drafts[id]).toBeUndefined();
+  });
+
+  it.each(["completed", "cancelled", "failed"] as const)("settles a pending receipt immediately when the run becomes %s", async (status) => {
+    const entry = {
+      id: "supplement-comment", issue_id: "issue", actor_type: "member", actor_id: "user",
+      content: "Create receipt evidence.", type: "comment", created_at: "2026-09-07T00:00:10Z",
+      supplement_task_id: id, supplement_status: "pending",
+    } as TimelineEntry;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    client.setQueryData(issueKeys.tasks("issue"), [task()]);
+    renderWithI18n(<QueryClientProvider client={client}>
+      <SupplementReceipt issueId="issue" entry={entry} />
+    </QueryClientProvider>);
+    expect(screen.getByRole("status")).toHaveTextContent("Waiting for delivery");
+    act(() => client.setQueryData(issueKeys.tasks("issue"), [task({ status })]));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Not delivered · the run ended before delivery"));
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("localizes a stable injection failure and retries the same bound comment", async () => {
+    vi.mocked(api.retryTaskSupplement).mockResolvedValue();
+    vi.mocked(api.listTasksByIssue).mockResolvedValue([task()]);
+    const entry = {
+      id: "supplement-comment", issue_id: "issue", actor_type: "member", actor_id: "user",
+      content: "Create receipt evidence.", type: "comment", created_at: "2026-09-07T00:00:10Z",
+      supplement_task_id: id, supplement_status: "failed", supplement_failure_reason: "provider_rejected",
+    } as TimelineEntry;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    client.setQueryData(issueKeys.tasks("issue"), [task()]);
+    renderWithI18n(<QueryClientProvider client={client}>
+      <SupplementReceipt issueId="issue" entry={entry} />
+    </QueryClientProvider>);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Not delivered · the agent rejected the message");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(api.retryTaskSupplement).toHaveBeenCalledWith("issue", id, "supplement-comment"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).not.toBeDisabled());
+    act(() => client.setQueryData(issueKeys.tasks("issue"), [task({ status: "completed" })]));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument());
+    expect(screen.getByRole("alert")).toHaveTextContent("Not delivered · the agent rejected the message");
+  });
+
+  it("previews streamed agent messages in collapsed steps and expands the full body", async () => {
+    const message: TaskMessagePayload = {
+      task_id: id, issue_id: "issue", seq: 1, type: "text", content: "Checking the PR",
+    };
+    vi.mocked(api.listTaskMessages).mockResolvedValue([message]);
+    const { client } = setup(task());
+    await screen.findByText("Checking the PR");
+    fireEvent.click(screen.getByRole("button", { name: /View activity/ }));
+    const preview = screen.getAllByText("Checking the PR").find((node) => node.closest("summary"))!;
+    expect(preview).toHaveAttribute("title", "Checking the PR");
+    expect(screen.queryByTestId("step-body")).not.toBeInTheDocument();
+    act(() => client.setQueryData(chatKeys.taskMessages(id), [
+      message,
+      { ...message, seq: 2, content: " changes.\nReviewing migration safety." },
+    ]));
+    await waitFor(() => expect(preview).toHaveTextContent("Checking the PR changes."));
+    expect(preview).toHaveAttribute("title", "Checking the PR changes.");
+    fireEvent.click(preview.closest("summary")!, { detail: 0 });
+    expect(await screen.findByTestId("step-body")).toHaveTextContent("Checking the PR changes. Reviewing migration safety.");
+  });
+
+  it("shows the first file in a collapsed Grok read_file group and retains its step count", async () => {
+    vi.mocked(api.listTaskMessages).mockResolvedValue(
+      ["queries.sql", "models.go", "schema.sql", "migrations.go"].flatMap((file, index) => [
+        { task_id: id, issue_id: "issue", seq: index * 2 + 1, type: "tool_use" as const,
+          tool: "read_file", input: { path: `/workdir/multica/server/db/${file}` } },
+        { task_id: id, issue_id: "issue", seq: index * 2 + 2, type: "tool_result" as const,
+          tool: "read_file", output: `Contents of ${file}` },
+      ]),
+    );
+    setup(task());
+    await screen.findByText(".../db/migrations.go");
+    fireEvent.click(screen.getByRole("button", { name: /View activity/ }));
+    const preview = screen.getByText("read_file · .../db/queries.sql");
+    const summary = preview.closest("summary")!;
+    expect(summary).toHaveTextContent("4 steps");
+    expect(preview).toHaveAttribute("title", "read_file · .../db/queries.sql");
+    fireEvent.click(summary, { detail: 0 });
+    expect(await screen.findByText(".../db/queries.sql")).toBeInTheDocument();
+    expect(screen.getByText(".../db/models.go")).toBeInTheDocument();
+    expect(screen.getByText(".../db/schema.sql")).toBeInTheDocument();
+  });
+
+  it("redacts message previews and keeps a label for empty messages", async () => {
+    const secret = `ghp_${"x".repeat(36)}`;
+    vi.mocked(api.listTaskMessages).mockResolvedValue([
+      { task_id: id, issue_id: "issue", seq: 1, type: "text", content: `Checking ${secret}` },
+      { task_id: id, issue_id: "issue", seq: 2, type: "thinking", content: "Checking logs" },
+      { task_id: id, issue_id: "issue", seq: 3, type: "text", content: " \n " },
+    ]);
+    setup(task());
+    await screen.findByText("Checking logs");
+    fireEvent.click(screen.getByRole("button", { name: /View activity/ }));
+    expect(screen.getByText("Checking [REDACTED GITHUB TOKEN]")).toHaveAttribute("title", "Checking [REDACTED GITHUB TOKEN]");
+    expect(screen.getByText("Agent message").closest("summary")).not.toBeNull();
+    expect(document.body.innerHTML).not.toContain(secret);
+  });
+
   it("previews streamed thinking in the header and collapsed steps, and expands its body", async () => {
     const thought: TaskMessagePayload = {
       task_id: id, issue_id: "issue", seq: 1, type: "thinking", content: "Checking the runtime",
@@ -175,7 +448,7 @@ describe("InlineCommentRun", () => {
     const { client, rerender } = setup(current);
     await screen.findByText("pnpm test");
     const progress = screen.getByText("pnpm test");
-    expect(progress).not.toHaveClass("animate-chat-text-shimmer");
+    expect(progress).not.toHaveClass("shimmer-text");
     expect(progress.closest("[data-run-summary]")).toHaveClass("h-[1lh]", "overflow-hidden");
     expect(document.querySelector("[data-run-loading-indicator]")).toHaveClass(
       "motion-safe:animate-spin",
