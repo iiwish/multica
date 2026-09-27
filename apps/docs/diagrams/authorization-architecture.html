@@ -667,7 +667,7 @@
         </div>
         <div class="run-notes">
           <p data-i18n-html="generalInvocation"><b>General invocation:</b> an explicit workspace grant can admit agent/system without a human originator. Private and member-target access remain denied.</p>
-          <p data-i18n-html="autopilotInvocation"><b>Autopilot:</b> manual runs use the clicker; automatic runs require the trigger's valid creator. Write access does not grant target-agent invocation.</p>
+          <p data-i18n-html="autopilotInvocation"><b>Autopilot:</b> writes and manual runs use the acting human; automatic runs use the stored trigger principal, possibly legacy-inferred. Invocation is checked separately.</p>
         </div>
       </section>
 
@@ -682,7 +682,7 @@
         <div class="enforcement-grid">
           <article class="enforcement-card">
             <strong data-i18n="routerTitle">Router and middleware</strong>
-            <p data-i18n="routerDescription">Credential, workspace membership, and coarse role gates.</p>
+            <p data-i18n="routerDescription">Verify credentials; strip untrusted actor headers; check membership and roles.</p>
             <span class="path">middleware/auth.go + workspace.go</span>
           </article>
           <article class="enforcement-card">
@@ -697,7 +697,7 @@
           </article>
           <article class="enforcement-card">
             <strong data-i18n="realtimeTitle">Realtime subscriptions</strong>
-            <p data-i18n="realtimeDescription">Workspace, user, task, and creator-private chat scopes are rechecked.</p>
+            <p data-i18n="realtimeDescription">Recheck subscription scopes; redact secrets from workspace broadcasts.</p>
             <span class="path">scope_authorizer.go</span>
           </article>
         </div>
@@ -766,17 +766,17 @@
           compositionScope: "scope",
           compositionDecision: "decision",
           generalInvocation: "<b>General invocation:</b> an explicit workspace grant can admit agent/system without a human originator. Private and member-target access remain denied.",
-          autopilotInvocation: "<b>Autopilot:</b> manual runs use the clicker; automatic runs require the trigger's valid creator. Write access does not grant target-agent invocation.",
+          autopilotInvocation: "<b>Autopilot:</b> writes and manual runs use the acting human; automatic runs use the stored trigger principal, possibly legacy-inferred. Invocation is checked separately.",
           enforcementTitle: "Enforce at every delivery boundary",
           enforcementSubtitle: "The client mirrors selected rules for UX; the server remains authoritative.",
           routerTitle: "Router and middleware",
-          routerDescription: "Credential, workspace membership, and coarse role gates.",
+          routerDescription: "Verify credentials; strip untrusted actor headers; check membership and roles.",
           handlerTitle: "Handlers and services",
           handlerDescription: "Ownership, grants, invocation, consent, redaction, and audit.",
           dataTitle: "Scoped data access",
           dataDescription: "Resource reads and writes carry <code>workspace_id</code> and invariants.",
           realtimeTitle: "Realtime subscriptions",
-          realtimeDescription: "Workspace, user, task, and creator-private chat scopes are rechecked.",
+          realtimeDescription: "Recheck subscription scopes; redact secrets from workspace broadcasts.",
           outcomeAllow: "Allow",
           outcomeRedact: "Allow with redaction",
           outcomeDeny: "Deny with 403",
@@ -834,17 +834,17 @@
           compositionScope: "范围",
           compositionDecision: "权限决策",
           generalInvocation: "<b>通用调用：</b>显式的工作区授权可允许没有人类发起者的 agent/system 调用；私有和指定成员授权仍拒绝此类调用。",
-          autopilotInvocation: "<b>自动化：</b>手动运行按点击者授权；自动运行必须验证触发器创建者。编辑权限不等于目标智能体调用权。",
+          autopilotInvocation: "<b>自动化：</b>写入和手动运行按实际代表的人类授权；自动运行使用触发器保存的主体，旧数据可能来自回填推定。调用权另行校验。",
           enforcementTitle: "在每个数据交付边界执行权限检查",
           enforcementSubtitle: "客户端为体验镜像部分规则，服务端始终是最终权威。",
           routerTitle: "路由与中间件",
-          routerDescription: "检查凭据、工作区成员关系和粗粒度角色。",
+          routerDescription: "验证凭据，清除不可信的主体请求头，检查成员关系和角色。",
           handlerTitle: "处理器与服务",
           handlerDescription: "检查所有权、显式授权、调用权、使用同意、脱敏与审计。",
           dataTitle: "限定范围的数据访问",
           dataDescription: "资源读写携带 <code>workspace_id</code> 并维护业务不变量。",
           realtimeTitle: "实时订阅",
-          realtimeDescription: "重新校验工作区、用户、task 和仅创建者可见的聊天范围。",
+          realtimeDescription: "重新校验订阅范围；工作区广播中的密钥统一脱敏。",
           outcomeAllow: "允许",
           outcomeRedact: "允许，但脱敏返回",
           outcomeDeny: "拒绝并返回 403",
