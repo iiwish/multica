@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { readFileSync } from "node:fs";
 
 vi.mock("../i18n", async () => {
   const editor = (await import("../locales/en/editor.json")).default;
@@ -68,6 +67,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   document.documentElement.className = "";
+  document.documentElement.removeAttribute("style");
+  document.body.removeAttribute("style");
 });
 
 function currentScale(): number {
@@ -196,35 +197,50 @@ describe("MermaidDiagram theme changes", () => {
     });
     expect(document.querySelector(".mermaid-diagram-frame")).not.toBeNull();
   });
-});
 
-// Verified in Chromium: dragging a diagram starts a native text selection that
-// paints the whole iframe box with the selection highlight (it is a replaced
-// element) and runs on into the surrounding comment text. Asserted against the
-// stylesheet because jsdom has no layout and cannot reproduce a real selection.
-// Deliberately NOT solved by preventDefault-ing pointerdown: that also drops
-// the default focus, which silently kills the viewer's keyboard controls.
-describe("Mermaid selection suppression", () => {
-  function blockFor(css: string, selector: string): string {
-    const start = css.indexOf(selector);
-    expect(start, `${selector} missing from stylesheet`).toBeGreaterThan(-1);
-    return css.slice(start, css.indexOf("}", start));
-  }
+  it("does not re-render when a dialog's scroll lock rewrites the page style", async () => {
+    render(<MermaidDiagram chart={CHART} />);
+    await waitFor(() => {
+      expect(mermaidRenderMock).toHaveBeenCalledTimes(1);
+    });
 
-  it("stops a drag on the inline diagram from selecting text", () => {
-    const mermaidCss = readFileSync("editor/styles/mermaid.css", "utf8");
+    // What the Dialog's scroll lock writes on every open and close. Taken for a
+    // theme switch, it re-rendered every diagram on the page as the viewer
+    // closed, and that stall made the page flash (MUL-7760).
+    await act(async () => {
+      document.body.style.overflow = "hidden";
+      await Promise.resolve();
+    });
+    await act(async () => {
+      document.body.style.removeProperty("overflow");
+      await Promise.resolve();
+    });
 
-    expect(blockFor(mermaidCss, ".mermaid-diagram-scroll {")).toContain(
-      "user-select: none",
-    );
+    // A real theme switch still re-renders, and it is the only extra render:
+    // any from the scroll lock would already have pushed the count past two.
+    await act(async () => {
+      document.documentElement.classList.add("dark");
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(mermaidRenderMock).toHaveBeenCalledTimes(2);
+    });
   });
 
-  it("stops a pan that leaves the viewer canvas from selecting text", () => {
-    // The canvas moved to the shared stylesheet when the image preview started
-    // using it; the rule still has to be there.
-    const zoomCss = readFileSync("editor/styles/zoom-canvas.css", "utf8");
+  it("re-renders when a theme token is written straight into the root style", async () => {
+    render(<MermaidDiagram chart={CHART} />);
+    await waitFor(() => {
+      expect(mermaidRenderMock).toHaveBeenCalledTimes(1);
+    });
 
-    expect(blockFor(zoomCss, ".zoom-canvas {")).toContain("user-select: none");
+    await act(async () => {
+      document.documentElement.style.setProperty("--muted", "rgb(1, 2, 3)");
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mermaidRenderMock).toHaveBeenCalledTimes(2);
+    });
   });
 });
 

@@ -38,6 +38,7 @@ import {
 } from "@multica/core/issues/stores";
 import { issueDetailOptions, issueTimelineOptions } from "@multica/core/issues/queries";
 import { useWorkspaceId } from "@multica/core";
+import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { useWorkspacePaths, WORKSPACE_PAGES } from "@multica/core/paths";
 import type { WorkspacePageKey, WorkspacePaths } from "@multica/core/paths";
 import { useModalStore } from "@multica/core/modals";
@@ -229,6 +230,7 @@ function IssueResultRow({
   disabled?: boolean;
   onSelect: (value: string) => void;
 }) {
+  const { colorOf, iconOf } = useIssueStatuses(useWorkspaceId());
   return (
     <CommandPrimitive.Item
       key={issue.id}
@@ -240,6 +242,8 @@ function IssueResultRow({
       <div className="flex items-center gap-2.5">
         <StatusIcon
           status={issue.status}
+          color={colorOf(issue.status)}
+          icon={iconOf(issue.status)}
           category={issueStatusCategory(issue) ?? undefined}
           className="size-4 shrink-0"
         />
@@ -344,6 +348,7 @@ export function SearchCommand() {
     return intent;
   }, []);
   const wsId = useWorkspaceId();
+  const { colorOf, iconOf } = useIssueStatuses(wsId);
   const recentItems = useRecentIssuesStore(selectRecentIssues(wsId));
   const p: WorkspacePaths = useWorkspacePaths();
   const { theme, setTheme } = useTheme();
@@ -425,7 +430,7 @@ export function SearchCommand() {
     ];
 
     if (currentIssueId && currentIssue) {
-      const identifier = currentIssue.identifier;
+      const { id: issueId, identifier } = currentIssue;
       items.push(
         {
           key: "copy-issue-link",
@@ -462,12 +467,12 @@ export function SearchCommand() {
             // still can't load, no comments are on screen — dropping the
             // action matches the visible state.
             void queryClient
-              .ensureQueryData(issueTimelineOptions(currentIssueId))
+              .ensureQueryData(issueTimelineOptions(issueId))
               .then((entries) => {
                 useCommentCollapseStore
                   .getState()
-                  .collapseAll(currentIssueId, rootCommentIds(entries));
-                useResolvedExpandStore.getState().collapseAll(currentIssueId);
+                  .collapseAll(issueId, rootCommentIds(entries));
+                useResolvedExpandStore.getState().collapseAll(issueId);
               })
               .catch(() => {});
             setOpen(false);
@@ -480,12 +485,12 @@ export function SearchCommand() {
           keywords: ["unfold", "expand", "comments", "展开", "评论"],
           onSelect: () => {
             void queryClient
-              .ensureQueryData(issueTimelineOptions(currentIssueId))
+              .ensureQueryData(issueTimelineOptions(issueId))
               .then((entries) => {
-                useCommentCollapseStore.getState().expandAll(currentIssueId);
+                useCommentCollapseStore.getState().expandAll(issueId);
                 useResolvedExpandStore
                   .getState()
-                  .expandAll(currentIssueId, resolvedThreadRootIds(entries));
+                  .expandAll(issueId, resolvedThreadRootIds(entries));
               })
               .catch(() => {});
             setOpen(false);
@@ -946,6 +951,8 @@ export function SearchCommand() {
                   >
                     <StatusIcon
                       status={item.status}
+                      color={colorOf(item.status)}
+                      icon={iconOf(item.status)}
                       category={issueStatusCategory(item) ?? undefined}
                       className="size-4 shrink-0"
                     />

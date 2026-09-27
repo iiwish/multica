@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Loader2, RotateCcw, Square } from "lucide-react";
 import { toast } from "sonner";
 import { api, dispatchReasonCode } from "@multica/core/api";
-import { issueKeys } from "@multica/core/issues/queries";
+import { issueTasksOptions } from "@multica/core/issues/queries";
 import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import type { AgentTask } from "@multica/core/types";
 import { useTimeAgo } from "../../i18n";
@@ -17,8 +17,9 @@ import {
 import { ActorAvatar } from "../../common/actor-avatar";
 import { formatDuration } from "../../agents/components/agent-activity-hover-content";
 import { TranscriptButton } from "../../common/task-transcript";
-import { cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
+import { cancellationActorLabel, cancelReasonLabel, failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { useT } from "../../i18n";
+import { compareActiveIssueTasks } from "./active-task-order";
 import {
   formatTokens,
   formatUsd,
@@ -29,6 +30,7 @@ import { TerminateTaskConfirmDialog } from "./terminate-task-confirm-dialog";
 import { IssueUsageDialog } from "./issue-usage-dialog";
 import { TaskStatusIcon } from "./task-status-icon";
 import { useStatusLabel, useTriggerText } from "./task-run-labels";
+import { WakeupRunLabel } from "./wakeup-source-chip";
 
 // Right-panel section that lists every agent run for this issue. Active
 // runs sit at the top (always visible when present); past runs (terminal
@@ -80,12 +82,7 @@ export function ExecutionLogSection({ issueId, identifier }: ExecutionLogSection
   // a `["issues", "tasks"]` prefix-match — no local WS subscriptions
   // needed, and the cache stays fresh even when this component isn't
   // mounted (e.g. user cancels from agent-side, then navigates here).
-  const { data: tasks = [] } = useQuery({
-    queryKey: issueKeys.tasks(issueId),
-    queryFn: () => api.listTasksByIssue(issueId),
-    staleTime: 30_000,
-    refetchOnWindowFocus: true,
-  });
+  const { data: tasks = [] } = useQuery(issueTasksOptions(issueId));
 
   const activeTasks = useMemo(
     () =>
@@ -98,7 +95,7 @@ export function ExecutionLogSection({ issueId, identifier }: ExecutionLogSection
           // what tells the user the agent is alive and will resume.
           t.status === "waiting_local_directory" ||
           t.status === "running",
-      ),
+      ).toSorted(compareActiveIssueTasks),
     [tasks],
   );
 
@@ -181,7 +178,7 @@ export function ExecutionLogSection({ issueId, identifier }: ExecutionLogSection
               <button
                 type="button"
                 onClick={() => setShowPast(!showPast)}
-                className="flex w-full items-center gap-1 rounded px-1 py-1 text-caption text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+                className="flex w-full items-center gap-1 rounded-xs px-1 py-1 text-caption text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
               >
                 <ChevronRight
                   className={`!size-3 shrink-0 stroke-[2.5] transition-transform ${
@@ -288,6 +285,7 @@ export function IssueUsageTotal({
 
 const STATUS_TONE: Record<AgentTask["status"], string> = {
   queued: "text-warning",
+  deferred: "text-warning",
   dispatched: "text-warning",
   // Same tone as queued/dispatched — visually "stopped" so users see the
   // task is parked, but distinguished by the status label.
@@ -311,7 +309,7 @@ export function ActiveTaskRow({
 }: {
   task: AgentTask;
   issueId: string;
-  onTranscriptOpenChange?: (open: boolean) => void;
+  onTranscriptOpenChange?: (open: boolean, fromKeyboard?: boolean) => void;
 }) {
   const { t } = useT("issues");
   const [cancelling, setCancelling] = useState(false);
@@ -366,7 +364,11 @@ export function ActiveTaskRow({
   // same change that adds incremental reporting + cache invalidation.
   return (
     <RowShell task={task}>
-      <TriggerText text={trigger} />
+      {task.wakeup_id ? (
+        <WakeupRunLabel task={task} fallback={trigger} render={(label) => <TriggerText text={label} />} />
+      ) : (
+        <TriggerText text={trigger} />
+      )}
       <TaskCommentCoverage task={task} />
       <RowStatus title={label}>
         {task.status === "running" ? (
@@ -398,7 +400,7 @@ export function ActiveTaskRow({
                 aria-label={t(($) => $.execution_log.cancel_task_aria)}
               />
             }
-            className="flex items-center justify-center rounded p-1 text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center justify-center rounded-xs p-1 text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {cancelling ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -435,11 +437,12 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
   const time = task.completed_at ? timeAgo(task.completed_at) : "—";
   // A failed run always explains itself. A cancelled one only when the SERVER
   // cancelled it for a persisted reason (worktree claim gate, preserved-work
-  // delivery) — a user-initiated cancel stays a plain "Cancelled".
+  // delivery). Actor provenance is rendered independently below.
   const failureLabel =
     task.status === "failed"
       ? failureReasonLabel(task.failure_reason, tAgents)
       : cancelReasonLabel(task, tAgents);
+  const cancellationLabel = cancellationActorLabel(task, tAgents);
   // Hovering the status mark reveals the localized reason, never the raw
   // `task.error`. That field is operator-facing English prose the daemon and
   // server write for classification and logs (#7411) — pasting it into a
@@ -447,7 +450,9 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
   // something broke, and dragged absolute worktree paths and machine names
   // into hover text and screenshots. The full diagnostic stays one click away
   // in the transcript's Run details.
-  const statusTitle = failureLabel ?? label;
+  const statusTitle = cancellationLabel
+    ? [cancellationLabel, failureLabel].filter(Boolean).join(" · ")
+    : failureLabel ?? label;
 
   // What this run cost, in the slot the relative timestamp used to hold.
   //
@@ -505,12 +510,16 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
 
   return (
     <RowShell task={task} title={rowTitle}>
-      <TriggerText text={trigger} />
+      {task.wakeup_id ? (
+        <WakeupRunLabel task={task} fallback={trigger} render={(label) => <TriggerText text={label} />} />
+      ) : (
+        <TriggerText text={trigger} />
+      )}
       <TaskCommentCoverage task={task} />
       <RowStatus title={statusTitle}>
         <TaskStatusIcon status={task.status} />
         <span className="sr-only">
-          {[failureLabel ?? label, time].filter(Boolean).join(" · ")}
+          {[statusTitle, time].filter(Boolean).join(" · ")}
         </span>
         {usage ? (
           <span className="tabular-nums">{formatTokens(usage.tokens)}</span>
@@ -531,7 +540,7 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
                   aria-label={t(($) => $.execution_log.retry_task_aria)}
                 />
               }
-              className="flex items-center justify-center rounded p-1 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex items-center justify-center rounded-xs p-1 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
               {retrying ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -565,7 +574,7 @@ function RowShell({
   return (
     <div
       title={title || undefined}
-      className="group/execution-log-row flex items-center gap-2 overflow-hidden rounded px-1 py-1.5 transition-colors hover:bg-accent/40"
+      className="group/execution-log-row flex items-center gap-2 overflow-hidden rounded-xs px-1 py-1.5 transition-colors hover:bg-accent/40"
     >
       {task.agent_id ? (
         <ActorAvatar

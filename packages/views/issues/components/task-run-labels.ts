@@ -33,6 +33,9 @@ export function useTriggerText(task: AgentTask): string {
       ? t(($) => $.execution_log.trigger_retry_attempt_prefix, { attempt: task.attempt })
       : t(($) => $.execution_log.trigger_retry_prefix)
     : "";
+  // A wakeup run's stored summary is the rule's instruction; it reads as
+  // the wakeup instead. WakeupRunLabel adds the rule's condition.
+  if (task.wakeup_id) return retryPrefix + t(($) => $.wakeups.triggered_by_wakeup);
 
   if (task.trigger_summary) return retryPrefix + stripMentionMarkdown(task.trigger_summary);
   if (isRetry) {
@@ -42,12 +45,6 @@ export function useTriggerText(task: AgentTask): string {
   }
   if (task.autopilot_run_id) return t(($) => $.execution_log.trigger_autopilot);
   if (task.trigger_comment_id) return t(($) => $.execution_log.trigger_comment);
-  // Assignment-triggered run that carried a handoff note: show the note inline
-  // (truncated by the caller) the way comment triggers show their text, so the
-  // row reads as the handoff instead of the generic "initial run".
-  if (task.handoff_note) {
-    return retryPrefix + t(($) => $.execution_log.trigger_handoff_prefix) + stripMentionMarkdown(task.handoff_note);
-  }
   return t(($) => $.execution_log.trigger_initial);
 }
 

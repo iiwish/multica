@@ -15,6 +15,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { useT } from "../../i18n";
 import { formatDuration } from "../../agents/components/agent-activity-hover-content";
 import {
+  cacheHitRatePercent,
   collectUnmappedModels,
   formatTokens,
   formatUsd,
@@ -24,6 +25,7 @@ import {
 } from "../../runtimes/utils";
 import { KpiCard } from "../../runtimes/components/shared";
 import { useStatusLabel, useTriggerText } from "./task-run-labels";
+import { WakeupRunLabel } from "./wakeup-source-chip";
 import { TaskStatusIcon } from "./task-status-icon";
 
 // Per-run cost breakdown for one issue — the surface the execution log's
@@ -84,14 +86,10 @@ export function IssueUsageDialog({
     [priced, pricings],
   );
 
-  // Floor, not round: on a cache-heavy issue 99.55% rounds to "100% hit rate",
-  // which claims every single token came from cache. Flooring only ever says
-  // 100% when it is actually 100%, and one percentage point of pessimism is
-  // cheaper than an impossible-looking number.
   const cacheHitRate =
-    total && total.input + total.cacheRead > 0
-      ? Math.floor((total.cacheRead / (total.input + total.cacheRead)) * 100)
-      : 0;
+    total == null
+      ? null
+      : cacheHitRatePercent(total.input, total.cacheRead, total.cacheWrite);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -134,10 +132,14 @@ export function IssueUsageDialog({
                 label={t(($) => $.usage_detail.kpi_cache)}
                 value={formatUsd(total.cacheSavings)}
                 accent={total.cacheSavings > 0 ? "success" : "default"}
-                hint={t(($) => $.usage_detail.kpi_cache_hint, {
-                  pct: cacheHitRate,
-                  reads: formatTokens(total.cacheRead),
-                })}
+                hint={
+                  cacheHitRate == null
+                    ? "—"
+                    : t(($) => $.usage_detail.kpi_cache_hint, {
+                        pct: cacheHitRate,
+                        reads: formatTokens(total.cacheRead),
+                      })
+                }
               />
               <KpiCard
                 label={t(($) => $.usage_detail.kpi_tokens)}
@@ -340,7 +342,9 @@ function RunRow({ task, maxTokens }: { task: AgentTask; maxTokens: number }) {
       <td className="!pl-0 !text-left">
         <div className="flex items-center gap-2">
           <ActorAvatar actorType="agent" actorId={task.agent_id} size="sm" enableHoverCard />
-          <span className="max-w-[13rem] truncate">{trigger}</span>
+          <span className="max-w-[13rem] truncate">
+            {task.wakeup_id ? <WakeupRunLabel task={task} fallback={trigger} render={(label) => label} /> : trigger}
+          </span>
           {task.status === "running" ? (
             <span className="inline-flex shrink-0 items-center gap-1 text-micro text-info">
               <span className="h-1.5 w-1.5 rounded-full bg-info" />
