@@ -579,9 +579,11 @@ Flags: `--title` (required), `--description`, `--status`, `--priority`, `--assig
 ```bash
 multica issue update <id> --title "New title" --priority urgent
 multica issue update <id> --position 4.5
+multica issue update <id> --attachment revised.png
 ```
 
 `--position` sets the raw ordering value within the board column (lower sorts first). For relative moves, `issue reorder` is easier because it works out the value for you.
+`--attachment` uploads a local file and appends its Markdown reference to the end of the issue description. Repeat the flag to attach multiple files. To replace an existing image, also use `--description-file` to remove the old reference from the description.
 
 ### Reorder Issue
 
@@ -618,6 +620,16 @@ Built-in statuses: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `block
 `cancelled`. A workspace can define custom statuses on top of these; their keys are
 shown in **Settings → Issue Statuses**, and passing an unknown value returns the full
 list.
+
+To cancel an issue because it duplicates another, mark it so the original lists it:
+
+```bash
+multica issue status <id> cancelled --duplicate-of <original>
+```
+
+`--duplicate-of` takes an issue key or full UUID and requires status `cancelled`.
+`issue update <id> --duplicate-of <original>` does the same, but cannot be combined with
+description or attachment changes. Moving the issue to any other status removes the mark.
 
 ### Comments
 
